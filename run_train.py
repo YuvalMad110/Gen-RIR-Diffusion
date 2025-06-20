@@ -41,7 +41,7 @@ def parse_args():
     parser.add_argument('--use-cond-encoder', type=bool, default=False)
     # Dataset specific arguments
     parser.add_argument('--sample-max-sec', type=int, default=1, help="None for no limit, otherwise in samples")
-    parser.add_argument('--nSamples', type=int, default=10000, help="Number of samples to use from the dataset, None for all")
+    parser.add_argument('--nSamples', type=int, default=None, help="Number of samples to use from the dataset, None for all")
     parser.add_argument('--hop-length', type=int, default=64)
     parser.add_argument('--n-fft', type=int, default=128)
     parser.add_argument('--sr-target', type=int, default=22050, help="Target sampling rate for the RIRs, if None, use original sampling rate")
@@ -96,7 +96,7 @@ def main():
                   "sample_max_sec": args.sample_max_sec, "sr_target": args.sr_target}
     # num_workers_test(dataset=dataset, batch_size=args.batch_size)    
     # return
-    
+
     # Model
     model = RIRDiffusionModel(device=device, 
                  sample_size=sample_size, 

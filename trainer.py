@@ -41,7 +41,7 @@ class DiffusionTrainer():
         self.epochs = epochs
         self.lr = lr
         self.n_timesteps = n_timesteps
-        self.use_amp = torch.cuda.is_available() and self.device == 'cuda'
+        self.use_amp = torch.cuda.is_available() and self.device.type == 'cuda'
         self.checkpoint_freq = checkpoint_freq
         self.logdir = get_timestamped_logdir('outputs/not_completed')
         self.data_info = data_info if data_info is not None else {}
@@ -104,9 +104,7 @@ class DiffusionTrainer():
                         prediction = self.model(noisy_rirs, timesteps, condition.unsqueeze(1))
                         noise_pred = prediction["sample"]
                         loss = F.mse_loss(noise_pred, noise)
-                        epoch_loss += loss.item()
-                        loss_value = self.accelerator.gather_for_metrics(loss.detach()) # gather loss values across all processes
-                        epoch_loss += loss_value.mean().item() # batch accumulated loss, mean across processes
+                    # Mixed precision backward pass
                     scaler.scale(loss).backward()
                     scaler.step(self.optimizer)
                     scaler.update()
@@ -116,14 +114,16 @@ class DiffusionTrainer():
                     loss = F.mse_loss(noise_pred, noise)
                     loss.backward()
                     self.optimizer.step()
+                # gather loss values across all processes (for logging)
+                loss_value = self.accelerator.gather_for_metrics(loss.detach()) # gather loss values across all processes
+                epoch_loss += loss_value.mean().item() # batch accumulated loss, mean across processes
                 # --------------------------------------- End Forward pass ---------------------------------------
 
              # ------------- End of Batch-loop -------------
             if self.accelerator.is_main_process:
-                best_loss, best_model_dict, loss_per_epoch, progress_bar, avg_epoch_loss, eta_td = self.epoch_wrapup(
-                    epoch, epoch_loss, best_loss, loss_per_epoch, progress_bar, train_start_time, best_model_dict, dataloader_len=len(dataloader))
-                progress_bar.set_postfix({'epoch': epoch + 1, 'loss': avg_epoch_loss,
-                    'lr': self.optimizer.param_groups[0]['lr'], 'eta': str(eta_td)})
+                best_loss, best_model_dict, loss_per_epoch, progress_bar = self.epoch_wrapup(
+                    epoch, epoch_loss, best_loss, loss_per_epoch, progress_bar, train_start_time, 
+                    best_model_dict, dataloader_len=len(dataloader), lr=self.optimizer.param_groups[0]['lr'])
 
         # ------------- End of Epoch-loop -------------
         
@@ -143,7 +143,7 @@ class DiffusionTrainer():
 
 
 
-    def epoch_wrapup(self, epoch, epoch_loss, best_loss, loss_per_epoch, progress_bar, train_start_time, best_model_dict, dataloader_len):
+    def epoch_wrapup(self, epoch, epoch_loss, best_loss, loss_per_epoch, progress_bar, train_start_time, best_model_dict, dataloader_len, lr):
         """
         Wrap up the epoch, check for best model, save checkpoints, and log metrics.
         """
@@ -153,17 +153,19 @@ class DiffusionTrainer():
         # check for best model
         if avg_epoch_loss < best_loss:
             best_loss = avg_epoch_loss
+            model_unwrapped = self.accelerator.unwrap_model(self.model)
             best_model_dict = {
                 'epoch': epoch + 1,
-                'use_cond_encoder': self.model.use_cond_encoder,
-                'light_mode': self.model.light_mode,
-                'model_nParams': self.model.count_parameters(),
+                'use_cond_encoder': model_unwrapped.use_cond_encoder,
+                'light_mode': model_unwrapped.light_mode,
+                'model_nParams': model_unwrapped.count_parameters(),
                 'n_timesteps': self.n_timesteps,
                 'sample_size': self.data_info.get('sample_size', None),
                 'data_info': self.data_info,
                 # 'hop_length': self.hop_length,
-                'state_dict': self.model.state_dict(),
+                'state_dict': model_unwrapped.state_dict(),
                 'optimizer': self.optimizer.state_dict(),
+                'loss_per_epoch': loss_per_epoch
             }
             
         # Save best model every checkpoint_freq epochs
@@ -176,8 +178,10 @@ class DiffusionTrainer():
         total_elapsed_time = datetime.timedelta(seconds=int(time.time() - train_start_time))
         logging.info(f"[Epoch {epoch+1}] Elapsed: {str(total_elapsed_time)} | ETA: {eta_td}\n"
                     f"         Loss: {avg_epoch_loss:.4f} | LR: {self.optimizer.param_groups[0]['lr']:.6f}")
+        progress_bar.set_postfix({'epoch': epoch + 1, 'loss': avg_epoch_loss,
+                    'lr': lr, 'eta': str(eta_td)})
             
-        return best_loss, best_model_dict, loss_per_epoch, progress_bar, avg_epoch_loss, eta_td
+        return best_loss, best_model_dict, loss_per_epoch, progress_bar
 
 
     # @torch.no_grad()
