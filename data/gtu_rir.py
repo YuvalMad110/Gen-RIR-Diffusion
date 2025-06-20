@@ -3,18 +3,22 @@ import tarfile
 import pickle
 import torch
 from torch.utils.data import Dataset
+import torchaudio
 import numpy as np
 
 class GTURIRDataset(Dataset):
-    def __init__(self, tar_path, mode='raw', nSamples=None, max_length=88200, inside_file='RIR.pickle.dat', hop_length=256, n_fft=512, use_spectrogram=False):
+    def __init__(self, tar_path, mode='raw', nSamples=None, sample_max_sec=2, inside_file='RIR.pickle.dat',
+                  hop_length=256, n_fft=512, use_spectrogram=False, sr_orig=44100, sr_target=None):
         self.data = self._load_from_tar(tar_path, inside_file)
         if nSamples and nSamples < len(self.data):
             self.data = self.data[:nSamples]
         self.mode = mode
-        self.max_length = max_length
+        self.sample_max_sec = sample_max_sec
         self.hop_length = hop_length
         self.n_fft = n_fft
         self.use_spectrogram = use_spectrogram
+        self.sr_orig = sr_orig
+        self.sr_target = sr_target if sr_target else sr_orig
 
         self.rir_data_field_numbers = {"timestamp": 0, "speakerMotorIterationNo": 1, "microphoneMotorIterationNo": 2,
                                        "speakerMotorIterationDirection": 3, "currentActiveSpeakerNo": 4,
@@ -49,16 +53,29 @@ class GTURIRDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.data[idx]
-        # RIR
-        rir = np.array(sample[43], dtype=np.float32)
-        if self.max_length:
-            rir = np.pad(rir, (0, max(0, self.max_length - len(rir))))[:self.max_length]
-        rir = torch.tensor(rir).unsqueeze(0) # [1, T]
+        # ---- PreProcess RIR ----
+        rir_np = np.array(sample[43], dtype=np.float32)
+        rir = torch.tensor(rir_np).unsqueeze(0)  # [1, T]
+        # Crop by seconds
+        if self.sr_orig != self.sr_target:
+            resampler = torchaudio.transforms.Resample(
+                orig_freq=self.sr_orig,
+                new_freq=self.sr_target
+            )
+            rir = resampler(rir)
+        # Resample
+        if self.sample_max_sec:
+            max_len_samples = int(self.sr_target * self.sample_max_sec)
+            rir = torch.nn.functional.pad(rir, (0, max(0, max_len_samples - rir.shape[-1])))
+            rir = rir[:, :max_len_samples]
+        # Spectrogram
         if self.use_spectrogram:
             # Convert to spectrogram if required (2 channels for real and imaginary parts)
             window = torch.hann_window(self.n_fft, device=rir.device)
             rir = torch.stft(rir.squeeze(0), n_fft=self.n_fft, hop_length=self.hop_length, return_complex=True, window=window)
             rir = torch.stack((rir.real, rir.imag), dim=0)  # [2, F, T]
+
+        # ---- Prepare Metadata ----
         # RT60
         rt60 = float(sample[int(self.rir_data_field_numbers['rt60'])])
         # Room dimensions [m]

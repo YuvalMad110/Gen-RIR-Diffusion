@@ -5,9 +5,10 @@ import librosa
 import pywt
 # from datasets.soundspaces_rir import SoundspacesRIRDataset (future)
 
-def load_rir_dataset(name, path, mode='raw', nSamples=None, max_length=88200, use_spectrogram=False, hop_length=256, n_fft=512):
+def load_rir_dataset(name, path, mode='raw', nSamples=None, sample_max_sec=88200, use_spectrogram=False, hop_length=256, n_fft=512, sr_target=None):
     if name == 'gtu':
-        return GTURIRDataset(path, mode=mode, nSamples=nSamples, max_length=max_length, use_spectrogram=use_spectrogram, hop_length=hop_length, n_fft=n_fft)
+        return GTURIRDataset(path, mode=mode, nSamples=nSamples, sample_max_sec=sample_max_sec, use_spectrogram=use_spectrogram, 
+                             sr_target=sr_target, hop_length=hop_length, n_fft=n_fft)
     else:
         raise ValueError(f"Unknown dataset name: {name}")
 
