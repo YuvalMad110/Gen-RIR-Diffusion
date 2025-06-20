@@ -43,7 +43,7 @@ class DiffusionTrainer():
         self.n_timesteps = n_timesteps
         self.use_amp = torch.cuda.is_available() and self.device == 'cuda'
         self.checkpoint_freq = checkpoint_freq
-        self.logdir = get_timestamped_logdir('outputs/rir_diffuser/not_completed')
+        self.logdir = get_timestamped_logdir('outputs/not_completed')
         self.data_info = data_info if data_info is not None else {}
          # Setup Accelerator for DDP/AMP
         self.accelerator = accelerator

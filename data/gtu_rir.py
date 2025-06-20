@@ -6,8 +6,10 @@ from torch.utils.data import Dataset
 import numpy as np
 
 class GTURIRDataset(Dataset):
-    def __init__(self, tar_path, mode='raw', max_length=88200, inside_file='RIR.pickle.dat', hop_length=256, n_fft=512, use_spectrogram=False):
+    def __init__(self, tar_path, mode='raw', nSamples=None, max_length=88200, inside_file='RIR.pickle.dat', hop_length=256, n_fft=512, use_spectrogram=False):
         self.data = self._load_from_tar(tar_path, inside_file)
+        if nSamples and nSamples < len(self.data):
+            self.data = self.data[:nSamples]
         self.mode = mode
         self.max_length = max_length
         self.hop_length = hop_length
