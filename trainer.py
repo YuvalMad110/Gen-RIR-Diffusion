@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import shutil
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
-from utils import save_metric, get_timestamped_logdir
+from utils.misc import save_metric, get_timestamped_logdir, plot_signals
 from tqdm import tqdm
 from diffusers import DDPMScheduler
 
@@ -211,7 +211,7 @@ class DiffusionTrainer():
 
         # Use encoder if defined
         if self.model.use_cond_encoder:
-            cond = self.condition_encoder(cond)  # [1, 128]
+            cond = self.model.condition_encoder(cond)  # [1, 128]
         cond = cond.unsqueeze(1)  # [B, 1, C] for model
 
         # Initialize with Gaussian noise

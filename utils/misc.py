@@ -186,3 +186,69 @@ def spectrogram_to_waveform(spectrogram, n_fft=256, hop_length=128, length=None,
     waveform = torch.istft(complex_spec, n_fft=n_fft, hop_length=hop_length,
                            window=window, length=length)
     return waveform
+
+def plot_signals(signals, legend=None, title="Signal Plot", save_path=None):
+    """
+    Plot multiple signals on a single plot.
+    
+    Args:
+        signals: List of 1D arrays/signals or 2D matrix (each row is a signal)
+        legend: List of legend labels. If None, uses indices (1, 2, ...)
+        title: Plot title
+        save_path: Path to save the plot. If None, only displays the plot
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    # Convert to numpy array if not already
+    if not isinstance(signals, np.ndarray):
+        signals = np.array(signals)
+    
+    # Handle different input formats
+    if signals.ndim == 1:
+        # Single signal - convert to 2D
+        signals = signals.reshape(1, -1)
+    elif signals.ndim == 2:
+        # Multiple signals - check if we need to transpose
+        # Assume longer dimension is time, shorter is number of signals
+        if signals.shape[0] > signals.shape[1]:
+            signals = signals.T  # Transpose so each row is a signal
+    
+    n_signals = signals.shape[0]
+    signal_length = signals.shape[1]
+    
+    # Create time axis
+    time = np.arange(signal_length)
+    
+    # Create the plot
+    plt.figure(figsize=(12, 6))
+    
+    # Plot each signal
+    for i in range(n_signals):
+        plt.plot(time, signals[i], linewidth=1.0, alpha=0.8)
+    
+    # Set up legend
+    if legend is None:
+        legend = [f'Signal {i+1}' for i in range(n_signals)]
+    elif len(legend) != n_signals:
+        print(f"Warning: Legend length ({len(legend)}) doesn't match number of signals ({n_signals})")
+        legend = [f'Signal {i+1}' for i in range(n_signals)]
+    
+    plt.legend(legend)
+    
+    # Set labels and title
+    plt.xlabel('Sample Index')
+    plt.ylabel('Amplitude')
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Save if path provided
+    if save_path is not None:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to: {save_path}")
+    
+    # Show the plot (this will open in VS Code if running in VS Code)
+    plt.show()

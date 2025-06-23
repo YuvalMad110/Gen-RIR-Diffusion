@@ -8,7 +8,7 @@ import shutil
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
-from utils import save_metric, get_timestamped_logdir
+from utils.misc import save_metric, get_timestamped_logdir
 
 from tqdm import tqdm
 from diffusers.models.unets import UNet2DConditionModel

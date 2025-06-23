@@ -16,7 +16,7 @@ from diffusers import DDPMScheduler
 from trainer import DiffusionTrainer
 
 
-# CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 /home/yuvalmad/python312/bin/accelerate launch --multi_gpu --num_processes=8 ./Projects/Gen-RIR-Diffusion/run_train.py --batch-size 16
+# CUDA_VISIBLE_DEVICES=0,1,2,3 /home/yuvalmad/python312/bin/accelerate launch --multi_gpu --num_processes=4 ./Projects/Gen-RIR-Diffusion/run_train.py --batch-size 16 --epochs 100 --nSamples 128
 
 def get_datasets_folder():
     """
@@ -30,12 +30,12 @@ def get_datasets_folder():
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset-path', type=str, default=get_datasets_folder())
-    parser.add_argument('--batch-size', type=int, default=16)
+    parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--epochs', type=int, default=2)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--n-timesteps', type=int, default=512)
+    parser.add_argument('--n-timesteps', type=int, default=1000)
     parser.add_argument('--light-mode', type=bool, default=False)
     parser.add_argument('--checkpoint-freq', type=int, default=5)
     parser.add_argument('--use-cond-encoder', type=bool, default=False)
@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument('--sample-max-sec', type=int, default=1, help="None for no limit, otherwise in samples")
     parser.add_argument('--nSamples', type=int, default=None, help="Number of samples to use from the dataset, None for all")
     parser.add_argument('--hop-length', type=int, default=64)
-    parser.add_argument('--n-fft', type=int, default=128)
+    parser.add_argument('--n-fft', type=int, default=256)
     parser.add_argument('--sr-target', type=int, default=22050, help="Target sampling rate for the RIRs, if None, use original sampling rate")
 
     return parser.parse_args()
