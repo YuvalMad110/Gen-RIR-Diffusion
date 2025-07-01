@@ -29,8 +29,7 @@ from tqdm import tqdm
 from diffusers import DDPMScheduler
 from RIRDiffusionModel import RIRDiffusionModel
 from data.rir_dataset import load_rir_dataset
-print("=== ALL IMPORTS SUCCESSFUL ===")
-
+from utils.signal_edc import create_edc_plots_mode2
 
 
 def load_model_and_config(model_path: str, device: torch.device) -> Tuple[RIRDiffusionModel, dict]:
@@ -379,7 +378,7 @@ def format_condition_string(condition: np.ndarray, mode: str = "room") -> str:
         speaker_loc = condition[6:9]
         return f"Mic: ({mic_loc[0]:.1f},{mic_loc[1]:.1f},{mic_loc[2]:.1f}), Src: ({speaker_loc[0]:.1f},{speaker_loc[1]:.1f},{speaker_loc[2]:.1f})"
 
-def create_mode1_plot(rirs: List[np.ndarray], conditions: np.ndarray, sr: int, save_path: str):
+def create_base_plot_mode1(rirs: List[np.ndarray], conditions: np.ndarray, sr: int, save_path: str):
     """
     Create plot for Mode 1: Random conditions (2 columns: waveform + spectrogram).
     
@@ -436,7 +435,7 @@ def create_mode1_plot(rirs: List[np.ndarray], conditions: np.ndarray, sr: int, s
     
     print(f"Mode 1 plot saved to: {plot_path}")
 
-def create_mode2_plot(real_rirs_wave: List[np.ndarray], generated_rirs_wave: List[np.ndarray], 
+def create_base_plot_mode2(real_rirs_wave: List[np.ndarray], generated_rirs_wave: List[np.ndarray], 
                      real_rirs_spec: List[np.ndarray], generated_rirs_spec: List[np.ndarray],
                      conditions: np.ndarray, rir_indices: List[int], sr: int, save_path: str, title: str):
     """
@@ -608,14 +607,18 @@ def main():
     # --- Cfg ---
     parser.add_argument("--mode", type=int, choices=[1, 2], default=2,
                     help="Mode 1: Random conditions, Mode 2: Dataset conditions with comparison")
+    parser.add_argument('--nSamples', type=int, default=128, 
+                        help="Only for old runs where data_info['nSamples'] is not available. Number of samples to load from dataset.")
     parser.add_argument("--model_path", type=str, 
-                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Jun21_00-58-33_dsief07/model_best.pth.tar',
+                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Jun24_00-37-28_dsief07/model_best.pth.tar',
                     help="Path to the trained model checkpoint (.pth.tar)")
     parser.add_argument("--save_path", type=str, default=None,
                     help="Directory to save generated plots and audio")
     parser.add_argument("--device", type=str, default=None,
                     help="Device to use (cuda/cpu). Auto-detect if not specified")
     parser.add_argument("--save_audio", action="store_true",
+                    help="Save generated RIRs as audio files")
+    parser.add_argument("--save_inference", action="store_true",
                     help="Save generated RIRs as audio files")
     parser.add_argument("--seed", type=int, default=None,
                     help="Random seed for reproducible generation")
@@ -624,7 +627,7 @@ def main():
     # --- Parameters ---
     parser.add_argument("--n_timesteps", type=int, default=None,
                     help="None for the n_timesteps used in training, otherwise specify the number of timesteps for generation")
-    parser.add_argument("--nRIR", type=int, default=10,
+    parser.add_argument("--nRIR", type=int, default=5,
                     help="Number of RIRs to generate")
     parser.add_argument("--rir_indices", type=int, nargs='+', default=None,
                     help="Specific RIR indices to use from dataset (mode 2 only)")  
@@ -637,10 +640,11 @@ def main():
                     help="FFT size for STFT")
     parser.add_argument("--sample_max_sec", type=float, default=None,
                     help="Maximum sample duration in seconds")
-    parser.add_argument("--nSamples", type=int, default=None,
-                    help="Number of samples to load from dataset")
     parser.add_argument("--sr_target", type=int, default=None,
                     help="Target sample rate")
+    parser.add_argument("--octaves", type=float, nargs='+', 
+                    default=[125, 250, 500, 1000, 2000, 4000],
+                    help="Octave center frequencies for EDC analysis")
     
     args = parser.parse_args()
     
@@ -674,11 +678,11 @@ def main():
     hop_length = args.hop_length if args.hop_length is not None else data_info['hop_length']
     use_spectrogram = args.use_spectrogram if args.use_spectrogram is not None else data_info['use_spectrogram']
     sr_target = args.sr_target if args.sr_target is not None else data_info['sr_target']
-    title = f"sr: {sr_target}Hz, hop_length: {hop_length}, n_fft: {n_fft}, sample_max_sec: {sample_max_sec}"
-
+    nSamples = data_info.get('nSamples', args.nSamples)
     if args.n_timesteps is not None:
         config['n_timesteps'] = args.n_timesteps
     print(f"Using sample rate: {sample_rate} Hz and {config['n_timesteps']} timesteps for generation")
+    title = f"sr: {sr_target}Hz, nTimesteps: {config['n_timesteps']}\nhop_length: {hop_length}, n_fft: {n_fft}, sample_max_sec: {sample_max_sec}"
     
     # -------------- Generate or load conditions based on mode --------------
     if args.mode == 1:
@@ -693,7 +697,7 @@ def main():
         print("Mode 2: Loading conditions from dataset...")
         # Load dataset
         dataset = load_rir_dataset(
-            'gtu', args.dataset_path, mode='raw',
+            'gtu', args.dataset_path, mode='raw', nSamples=nSamples,
             hop_length=hop_length, n_fft=n_fft, sr_target=sr_target,
             use_spectrogram=use_spectrogram, sample_max_sec=sample_max_sec
         )        
@@ -713,12 +717,14 @@ def main():
     conditions_np = conditions.cpu().numpy()
     
     if args.mode == 1:
-        create_mode1_plot(generated_rirs, conditions_np, sample_rate, args.save_path)
+        create_base_plot_mode1(generated_rirs, conditions_np, sample_rate, args.save_path)
     else:
         # Convert generated spectrograms for plotting
         generated_rirs_spec_list = [generated_specs[i] for i in range(len(generated_rirs))]
-        create_mode2_plot(real_rirs_wave, generated_rirs, real_rirs_spec, generated_rirs_spec_list,
+        create_base_plot_mode2(real_rirs_wave, generated_rirs, real_rirs_spec, generated_rirs_spec_list,
                         conditions_np, rir_indices, sample_rate, args.save_path, title)
+        create_edc_plots_mode2(real_rirs_wave, generated_rirs, conditions_np, rir_indices, 
+                      sample_rate, args.save_path, args.octaves, title)
     
     # Save audio files if requested
     if args.save_audio:
@@ -727,8 +733,9 @@ def main():
             save_audio_files(real_rirs, args.save_path, sample_rate, "real")
     
     # Save statistics
-    save_generation_stats(generated_rirs, conditions_np, config, args.model_path, 
-                        args.save_path, sample_rate, args.mode, real_rirs, rir_indices)
+    if args.save_inference:
+        save_generation_stats(generated_rirs, conditions_np, config, args.model_path, 
+                            args.save_path, sample_rate, args.mode, real_rirs, rir_indices)
     
     print(f"\n Generation completed successfully!")
     print(f" Results saved to: {save_path}")
