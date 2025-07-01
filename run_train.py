@@ -93,7 +93,7 @@ def main():
     )
     sample_size = get_sample_size(dataloader)
     data_info = {"n_fft": args.n_fft, "hop_length": args.hop_length, "use_spectrogram": True, "sample_size": sample_size,
-                  "sample_max_sec": args.sample_max_sec, "sr_target": args.sr_target}
+                  "sample_max_sec": args.sample_max_sec, "sr_target": args.sr_target, "nSamples": args.nSamples}
     # num_workers_test(dataset=dataset, batch_size=args.batch_size)    
     # return
 

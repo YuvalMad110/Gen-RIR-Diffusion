@@ -34,7 +34,7 @@ def get_timestamped_logdir(subdir_name="runs"):
     # Get timestamp in Israel timezone
     timestamp = datetime.now(timezone(timedelta(hours=3))).strftime("%b%d_%H-%M-%S")
     # Path to the main script (not where it's called from)
-    base_path = os.path.dirname(os.path.abspath(__file__))
+    base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     # Combine path
     log_dir = os.path.join(base_path, subdir_name, f"{timestamp}_{hostname}")
     return log_dir

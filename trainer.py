@@ -63,6 +63,7 @@ class DiffusionTrainer():
         self.model.train()
         scaler = GradScaler() if self.use_amp else None
         loss_per_epoch = []
+        norm_loss_per_epoch = []
         best_loss = float('inf')
         train_start_time = time.time()
         best_model_dict = None
@@ -81,6 +82,7 @@ class DiffusionTrainer():
         for epoch in range(self.epochs):
             # epoch setup
             epoch_loss = 0.0
+            epoch_norm_loss  = 0.0
             progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{self.epochs}")
             # Bacth loop
             for rir, room_dim, mic_loc, speaker_loc, rt60 in progress_bar:
@@ -116,13 +118,16 @@ class DiffusionTrainer():
                     self.optimizer.step()
                 # gather loss values across all processes (for logging)
                 loss_value = self.accelerator.gather_for_metrics(loss.detach()) # gather loss values across all processes
-                epoch_loss += loss_value.mean().item() # batch accumulated loss, mean across processes
+                norm_loss_value = self.calculate_norm_loss(noisy_rirs, loss)
+                if self.accelerator.is_main_process:
+                    epoch_loss += loss_value.mean().item() # batch accumulated loss, mean across processes
+                    epoch_norm_loss += norm_loss_value.mean().item()
                 # --------------------------------------- End Forward pass ---------------------------------------
 
              # ------------- End of Batch-loop -------------
             if self.accelerator.is_main_process:
-                best_loss, best_model_dict, loss_per_epoch, progress_bar = self.epoch_wrapup(
-                    epoch, epoch_loss, best_loss, loss_per_epoch, progress_bar, train_start_time, 
+                best_loss, best_model_dict, loss_per_epoch, norm_loss_per_epoch, progress_bar = self.epoch_wrapup(
+                    epoch, epoch_loss, epoch_norm_loss, best_loss, loss_per_epoch, norm_loss_per_epoch, progress_bar, train_start_time, 
                     best_model_dict, dataloader_len=len(dataloader), lr=self.optimizer.param_groups[0]['lr'])
 
         # ------------- End of Epoch-loop -------------
@@ -136,19 +141,24 @@ class DiffusionTrainer():
             logging.info(final_msg)
             print(final_msg)
              # save metrics plots
-            save_metric(loss_per_epoch, 'loss', self.logdir, apply_log=True)
+            save_metric(loss_per_epoch, 'log-loss', self.logdir, apply_log=True)
+            save_metric(loss_per_epoch, 'loss', self.logdir, apply_log=False)
+            save_metric(norm_loss_per_epoch, 'log-norm-loss', self.logdir, apply_log=True)
+            save_metric(norm_loss_per_epoch, 'norm-loss', self.logdir, apply_log=False)
             # move run outputs to the finished folder
             new_logdir = os.path.join(os.path.dirname(os.path.dirname(self.logdir)), 'finished', os.path.basename(self.logdir))
             shutil.move(self.logdir, new_logdir)
 
 
 
-    def epoch_wrapup(self, epoch, epoch_loss, best_loss, loss_per_epoch, progress_bar, train_start_time, best_model_dict, dataloader_len, lr):
+    def epoch_wrapup(self, epoch, epoch_loss, epoch_norm_loss, best_loss, loss_per_epoch, norm_loss_per_epoch, progress_bar, train_start_time, best_model_dict, dataloader_len, lr):
         """
         Wrap up the epoch, check for best model, save checkpoints, and log metrics.
         """
         avg_epoch_loss = epoch_loss / dataloader_len # average over batches and processes
         loss_per_epoch.append(avg_epoch_loss)
+        avg_epoch_norm_loss = epoch_norm_loss / dataloader_len # average over batches and processes
+        norm_loss_per_epoch.append(avg_epoch_norm_loss)
 
         # check for best model
         if avg_epoch_loss < best_loss:
@@ -165,7 +175,8 @@ class DiffusionTrainer():
                 # 'hop_length': self.hop_length,
                 'state_dict': model_unwrapped.state_dict(),
                 'optimizer': self.optimizer.state_dict(),
-                'loss_per_epoch': loss_per_epoch
+                'loss_per_epoch': loss_per_epoch,
+                'norm_loss_per_epoch': norm_loss_per_epoch
             }
             
         # Save best model every checkpoint_freq epochs
@@ -181,7 +192,7 @@ class DiffusionTrainer():
         progress_bar.set_postfix({'epoch': epoch + 1, 'loss': avg_epoch_loss,
                     'lr': lr, 'eta': str(eta_td)})
             
-        return best_loss, best_model_dict, loss_per_epoch, progress_bar
+        return best_loss, best_model_dict, loss_per_epoch, norm_loss_per_epoch, progress_bar
 
 
     # @torch.no_grad()
@@ -227,4 +238,15 @@ class DiffusionTrainer():
 
         return noisy_rir.cpu()
 
+    def calculate_norm_loss(self, noisy_rirs, loss):
+        """
+        Calculate the normalized loss between the predicted noise and the true noise.
+        For display alone (not used for model training)
+        """
+        B = noisy_rirs.shape[0]
+        norm_factor = noisy_rirs.view(B, -1).std(dim=1, keepdim=True).view(B, 1, 1, 1)
 
+        norm_loss = loss.detach() / (norm_factor ** 2)
+        norm_loss_value = self.accelerator.gather_for_metrics(norm_loss.detach())
+        return norm_loss_value
+    
