@@ -162,7 +162,10 @@ def create_edc_plots_mode2(real_rirs_wave: list, generated_rirs_wave: list,
     plt.subplots_adjust(wspace=0.3, hspace=0.6)
 
     # Save plot
-    plot_path = Path(save_path) / "edc_comparison_mode2.png"
+    if save_path.endswith(".png"):
+        plot_path = save_path
+    else:
+        plot_path = Path(save_path) / "edc_comparison_mode2.png"
     fig.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     

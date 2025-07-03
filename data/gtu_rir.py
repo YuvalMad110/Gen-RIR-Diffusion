@@ -68,12 +68,12 @@ class GTURIRDataset(Dataset):
             max_len_samples = int(self.sr_target * self.sample_max_sec)
             rir = torch.nn.functional.pad(rir, (0, max(0, max_len_samples - rir.shape[-1])))
             rir = rir[:, :max_len_samples]
-        # Spectrogram
-        if self.use_spectrogram:
-            # Convert to spectrogram if required (2 channels for real and imaginary parts)
-            window = torch.hann_window(self.n_fft, device=rir.device)
-            rir = torch.stft(rir.squeeze(0), n_fft=self.n_fft, hop_length=self.hop_length, return_complex=True, window=window)
-            rir = torch.stack((rir.real, rir.imag), dim=0)  # [2, F, T]
+        # # Spectrogram
+        # if self.use_spectrogram:
+        #     # Convert to spectrogram if required (2 channels for real and imaginary parts)
+        #     window = torch.hann_window(self.n_fft, device=rir.device)
+        #     rir = torch.stft(rir.squeeze(0), n_fft=self.n_fft, hop_length=self.hop_length, return_complex=True, window=window)
+        #     rir = torch.stack((rir.real, rir.imag), dim=0)  # [2, F, T]
 
         # ---- Prepare Metadata ----
         # RT60

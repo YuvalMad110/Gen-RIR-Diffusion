@@ -135,11 +135,7 @@ class DiffusionTrainer():
         # save Best model
         if self.accelerator.is_main_process:
             torch.save(best_model_dict, os.path.join(self.logdir, f'model_best.pth.tar'))
-            total_elapsed_time = datetime.timedelta(seconds=int(time.time() - train_start_time))
-            final_msg = f"""###########\nTraining finished successfully after {total_elapsed_time}
-                         Best model saved at epoch {best_model_dict['epoch']} with loss {best_loss:.4f}\n###########"""
-            logging.info(final_msg)
-            print(final_msg)
+            
              # save metrics plots
             save_metric(loss_per_epoch, 'log-loss', self.logdir, apply_log=True)
             save_metric(loss_per_epoch, 'loss', self.logdir, apply_log=False)
@@ -148,7 +144,14 @@ class DiffusionTrainer():
             # move run outputs to the finished folder
             new_logdir = os.path.join(os.path.dirname(os.path.dirname(self.logdir)), 'finished', os.path.basename(self.logdir))
             shutil.move(self.logdir, new_logdir)
-
+            # final log
+            total_elapsed_time = datetime.timedelta(seconds=int(time.time() - train_start_time))
+            final_msg = f"""###########\nTraining finished successfully after {total_elapsed_time}
+                         Best model saved at epoch {best_model_dict['epoch']} with loss {best_loss:.4f}\n
+                         save path: {new_logdir}###########"""
+            logging.info(final_msg)
+            print(final_msg)
+            
 
 
     def epoch_wrapup(self, epoch, epoch_loss, epoch_norm_loss, best_loss, loss_per_epoch, norm_loss_per_epoch, progress_bar, train_start_time, best_model_dict, dataloader_len, lr):

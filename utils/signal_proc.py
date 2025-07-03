@@ -3,7 +3,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-
+# ------------------------------------------------------------------------
+#                       Signal Transformations
+# ------------------------------------------------------------------------
 def waveform_to_spectrogram(waveform, hop_length, n_fft, sr=None) -> tuple:
     """
     Convert waveform(s) to spectrogram using the same approach as the training dataset.
@@ -24,14 +26,13 @@ def waveform_to_spectrogram(waveform, hop_length, n_fft, sr=None) -> tuple:
     else:
         rir_tensor = waveform.float()
     # Handle single waveform vs batch
-    single_input = False
     if rir_tensor.dim() == 1:
         # Single waveform - add batch dimension
         rir_tensor = rir_tensor.unsqueeze(0)  # [1, T]
         single_input = True
     elif rir_tensor.dim() == 2:
         # Batch of waveforms - shape [B, T]
-        pass
+        single_input = False
     else:
         raise ValueError(f"Expected 1D or 2D input, got {rir_tensor.dim()}D")
     
@@ -217,3 +218,130 @@ def plot_waveform(signals, legend=None, title=None, sr=None, save_path=None):
     
     # Show the plot (this will open in VS Code)
     plt.show()
+
+# ------------------------------------------------------------------------
+#                       Signal Scaling
+# ------------------------------------------------------------------------
+def calculate_edc(rir: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate Energy Decay Curve (EDC) from time-domain RIR.
+    
+    Args:
+        rir: Time-domain RIR tensor [batch, time]
+                       
+                                             
+    
+    Returns:
+        EDC tensor normalized to [0, 1]
+    """
+                           
+    energy = rir ** 2
+    edc = torch.cumsum(torch.flip(energy, dims=[-1]), dim=-1)
+    edc = torch.flip(edc, dims=[-1])
+    edc = edc / (torch.max(edc, dim=-1, keepdim=True)[0] + 1e-12)
+    return edc
+
+def estimate_decay_k_factor(edc: torch.Tensor, sr: float, db_cutoff: float = -40.0) -> torch.Tensor:
+    """
+    Estimate exponential decay rate k from EDC using least squares fit.
+    
+    Args:
+        edc: Energy Decay Curve tensor [batch, time]
+        sr: Sample rate
+        db_cutoff: dB cutoff for EDC cropping
+    
+    Returns:
+        Decay rate k for each sample in batch [batch]
+    """
+    # Crop EDC by dB cutoff
+    edc_db = 10 * torch.log10(edc + 1e-12)
+    
+    # Find crop index for each sample in batch
+    crop_indices = []
+    for i in range(edc.shape[0]):
+        cutoff_mask = edc_db[i] < db_cutoff
+        if cutoff_mask.any():
+            crop_idx = torch.where(cutoff_mask)[0][0].item()
+        else:
+            crop_idx = edc.shape[1]  # Use full length if no cutoff found
+        crop_indices.append(crop_idx)
+    
+    # Crop to minimum index to keep batch uniform
+    min_crop_idx = min(crop_indices)
+    cropped_edc = edc[:, :min_crop_idx]
+    
+    # Estimate decay rate
+    batch_size, seq_len = cropped_edc.shape
+    t = torch.arange(seq_len, dtype=torch.float32, device=cropped_edc.device) / sr
+    log_edc = torch.log(cropped_edc + 1e-12)
+    
+    # Least squares fitting: log_edc = slope * t + intercept
+    A = torch.stack([t, torch.ones_like(t)], dim=0).T
+    A = A.unsqueeze(0).expand(batch_size, -1, -1)
+    
+    AtA = torch.bmm(A.transpose(-2, -1), A)
+    Atb = torch.bmm(A.transpose(-2, -1), log_edc.unsqueeze(-1))
+    
+    solution = torch.linalg.solve(AtA, Atb)
+    slope = solution[:, 0, 0]
+    k = -slope / 2
+    
+    return k
+
+def apply_rir_scaling(rir: torch.Tensor, k: torch.Tensor, sr: float) -> torch.Tensor:
+    """
+    Apply exponential scaling to RIR using provided k factors.
+    
+    Args:
+        rir: Time-domain RIR tensor [batch, time]
+        k: Decay rate factors [batch]
+        sr: Sample rate
+    
+    Returns:
+        Scaled RIR tensor
+    """
+    rir_seq_len = rir.shape[-1]
+    t_full = torch.arange(rir_seq_len, dtype=torch.float32, device=rir.device) / sr
+    scaling_factor = torch.exp(k.unsqueeze(-1) * t_full.unsqueeze(0))
+    
+    return rir * scaling_factor
+
+def undo_rir_scaling(scaled_rir: torch.Tensor, k: torch.Tensor, sr: float) -> torch.Tensor:
+    """
+    Undo exponential scaling from RIR using provided k factors.
+    
+    Args:
+        scaled_rir: Scaled time-domain RIR tensor [batch, time]
+        k: Decay rate factors used for original scaling [batch]
+        sr: Sample rate
+    
+    Returns:
+        Unscaled RIR tensor
+    """
+    rir_seq_len = scaled_rir.shape[-1]
+    t_full = torch.arange(rir_seq_len, dtype=torch.float32, device=scaled_rir.device) / sr
+    # Inverse scaling: divide by the scaling factor (or multiply by its inverse)
+    inverse_scaling_factor = torch.exp(-k.unsqueeze(-1) * t_full.unsqueeze(0))
+    return scaled_rir * inverse_scaling_factor
+
+def scale_rir(rir: torch.Tensor, sr: float, db_cutoff: float = -40.0) -> torch.Tensor:
+    """
+    Scale RIR by estimating and compensating for natural decay.
+    
+    Args:
+        rir: Time-domain RIR tensor [batch, time]
+        sr: Sample rate
+        db_cutoff: dB cutoff for EDC cropping
+    
+    Returns:
+        Scaled RIR tensor
+    """
+    # Calculate EDC
+    edc = calculate_edc(rir)
+    
+    # Estimate decay rate k
+    k = estimate_decay_k_factor(edc, sr, db_cutoff)
+    
+    # Apply scaling
+    return apply_rir_scaling(rir, k, sr)
+

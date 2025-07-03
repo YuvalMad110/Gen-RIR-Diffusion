@@ -30,8 +30,17 @@ from diffusers import DDPMScheduler
 from RIRDiffusionModel import RIRDiffusionModel
 from data.rir_dataset import load_rir_dataset
 from utils.signal_edc import create_edc_plots_mode2
+from utils.signal_proc import calculate_edc, estimate_decay_k_factor, undo_rir_scaling, apply_rir_scaling
 
 
+"""
+finished runs:
+scaled - 128S 100E 1000T
+    /home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Jul02_18-11-05_dsief06
+
+raw -  128S 300E 1000T
+    /home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Jun24_00-37-28_dsief07/model_best.pth.ta
+"""
 def load_model_and_config(model_path: str, device: torch.device) -> Tuple[RIRDiffusionModel, dict]:
     """
     Load the trained diffusion model and its configuration.
@@ -140,9 +149,6 @@ def load_dataset_conditions(dataset, nRIR: int, data_info: dict, use_spectrogram
         data_info: Data configuration info
         use_spectrogram: Whether to return spectrograms or waveforms
         rir_indices: Optional list of specific indices to load
-    
-    Returns:
-        Tuple of (conditions_tensor, real_rirs_waveform, real_rirs_spectrogram, actual_indices)
     """
     if rir_indices is None:
         # Randomly select indices
@@ -199,8 +205,55 @@ def load_dataset_conditions(dataset, nRIR: int, data_info: dict, use_spectrogram
     
     # Convert to tensor
     conditions_tensor = torch.tensor(conditions, dtype=torch.float32)
+
+    # Check if scaling was used in training
+    scale_rir_enabled = data_info.get('scale_rir', False)
+    k_factors = None
+    if scale_rir_enabled:
+        # Calculate k factors for real RIRs to enable unscaling of generated RIRs
+        real_rirs_tensor = torch.stack([torch.tensor(rir, dtype=torch.float32) for rir in real_rirs_waveform])
+        edc = calculate_edc(real_rirs_tensor)
+        sr_target = data_info.get('sr_target', 22050)
+        db_cutoff = data_info.get('db_cutoff', -40.0)
+        k_factors = estimate_decay_k_factor(edc, sr_target, db_cutoff)
+        print(f"Calculated k-factors for unscaling: {k_factors}")
     
-    return conditions_tensor, real_rirs_waveform, real_rirs_spectrogram, rir_indices
+    return conditions_tensor, real_rirs_waveform, real_rirs_spectrogram, rir_indices, k_factors
+
+def prepare_scaled_unscaled_datasets(real_rirs_wave: List[np.ndarray], generated_rirs_wave: List[np.ndarray], 
+                                   k_factors: torch.Tensor, sr: int, n_fft: int, hop_length: int):
+    """
+    1. Scale real rir
+    2. Unscale generated rir 
+    3. Generate spectrograms of the above
+    """    
+    # Convert to tensors for processing
+    real_rirs_tensor = torch.stack([torch.tensor(rir, dtype=torch.float32) for rir in real_rirs_wave])
+    generated_rirs_tensor = torch.stack([torch.tensor(rir, dtype=torch.float32) for rir in generated_rirs_wave])
+    
+    # === SCALE REAL RIR ===
+    # Scale real RIRs using the same k-factors
+    scaled_real_tensor = apply_rir_scaling(real_rirs_tensor, k_factors, sr)
+    real_rirs_wave_scaled = [rir.cpu().numpy() for rir in scaled_real_tensor]
+    
+    # Convert scaled real RIRs to spectrograms
+    real_rirs_spec_scaled = []
+    for rir in real_rirs_wave_scaled:
+        spec = waveform_to_spectrogram(rir, hop_length, n_fft)
+        real_rirs_spec_scaled.append(spec)
+    
+    # === UNSCALED GENERATED RIR ===    
+    # Unscale generated RIRs
+    unscaled_generated_tensor = undo_rir_scaling(generated_rirs_tensor, k_factors, sr)
+    gen_rirs_wave_unscaled = [rir.cpu().numpy() for rir in unscaled_generated_tensor]
+    
+    # Convert unscaled generated RIRs to spectrograms
+    gen_rirs_spec_unscaled = []
+    for rir in gen_rirs_wave_unscaled:
+        spec = waveform_to_spectrogram(rir, hop_length, n_fft)
+        gen_rirs_spec_unscaled.append(spec)
+    
+    return  gen_rirs_wave_unscaled, gen_rirs_spec_unscaled, real_rirs_wave_scaled, real_rirs_spec_scaled
 
 def generate_rirs_batch(model: RIRDiffusionModel, conditions: torch.Tensor, device: torch.device, 
                        config: dict) -> Tuple[np.ndarray, List[np.ndarray]]:
@@ -292,6 +345,8 @@ def generate_rirs_batch(model: RIRDiffusionModel, conditions: torch.Tensor, devi
             data_info.get('n_fft', 128)
         )
         generated_rirs.append(waveform)
+    # convert to list
+    generated_specs = [generated_specs[i] for i in range(nRIR)]
     
     return generated_specs, generated_rirs
 
@@ -528,8 +583,10 @@ def create_base_plot_mode2(real_rirs_wave: List[np.ndarray], generated_rirs_wave
     # cbar_ax2 = fig.add_axes([0.96, 0.15, 0.015, 0.7])  # [left, bottom, width, height]
     # cbar2 = fig.colorbar(im2, cax=cbar_ax2, format='%+2.0f dB')
     # cbar2.set_label('Generated RIR (dB)', rotation=270, labelpad=15)
-    
-    plot_path = Path(save_path) / "generated_rirs_mode2_comparison.png"
+    if save_path.endswith(".png"):
+        plot_path = save_path
+    else:
+        plot_path = Path(save_path) / "rirs_comparison_mode2.png"
     fig.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     
@@ -608,9 +665,9 @@ def main():
     parser.add_argument("--mode", type=int, choices=[1, 2], default=2,
                     help="Mode 1: Random conditions, Mode 2: Dataset conditions with comparison")
     parser.add_argument('--nSamples', type=int, default=128, 
-                        help="Only for old runs where data_info['nSamples'] is not available. Number of samples to load from dataset.")
+                        help="Only take effect for old runs where data_info['nSamples'] is not available. Number of samples to load from dataset.")
     parser.add_argument("--model_path", type=str, 
-                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Jun24_00-37-28_dsief07/model_best.pth.tar',
+                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Jul02_18-11-05_dsief06/model_best.pth.tar',
                     help="Path to the trained model checkpoint (.pth.tar)")
     parser.add_argument("--save_path", type=str, default=None,
                     help="Directory to save generated plots and audio")
@@ -679,6 +736,7 @@ def main():
     use_spectrogram = args.use_spectrogram if args.use_spectrogram is not None else data_info['use_spectrogram']
     sr_target = args.sr_target if args.sr_target is not None else data_info['sr_target']
     nSamples = data_info.get('nSamples', args.nSamples)
+    scale_rir_enabled = data_info.get('scale_rir', False)
     if args.n_timesteps is not None:
         config['n_timesteps'] = args.n_timesteps
     print(f"Using sample rate: {sample_rate} Hz and {config['n_timesteps']} timesteps for generation")
@@ -702,7 +760,7 @@ def main():
             use_spectrogram=use_spectrogram, sample_max_sec=sample_max_sec
         )        
         # Load conditions and real RIRs
-        conditions, real_rirs_wave, real_rirs_spec, rir_indices = load_dataset_conditions(
+        conditions, real_rirs_wave, real_rirs_spec, rir_indices, k_factors = load_dataset_conditions(
             dataset, args.nRIR, data_info, use_spectrogram, args.rir_indices
         )
         conditions = conditions.to(device)
@@ -721,10 +779,27 @@ def main():
     else:
         # Convert generated spectrograms for plotting
         generated_rirs_spec_list = [generated_specs[i] for i in range(len(generated_rirs))]
-        create_base_plot_mode2(real_rirs_wave, generated_rirs, real_rirs_spec, generated_rirs_spec_list,
+        
+        # Scaled-RIR
+        if scale_rir_enabled:
+            gen_rirs_wave_unscaled, gen_rirs_spec_unscaled, real_rirs_wave_scaled, real_rirs_spec_scaled = prepare_scaled_unscaled_datasets(
+                real_rirs_wave, generated_rirs, k_factors, sr_target, n_fft, hop_length)
+            full_save_path = os.path.join(args.save_path, 'rirs_comparison_mode2_scaled.png')
+            create_base_plot_mode2(real_rirs_wave_scaled, generated_rirs, real_rirs_spec_scaled, generated_rirs_spec_list,
+                        conditions_np, rir_indices, sample_rate, full_save_path, f"**Scaled Signal**\n{title}")
+            full_save_path = os.path.join(args.save_path, 'edc_comparison_mode2_scaled.png')
+            create_edc_plots_mode2(real_rirs_wave_scaled, generated_rirs, conditions_np, rir_indices, 
+                        sample_rate, full_save_path, args.octaves, f"**Scaled Signal**\n{title}")
+        else:
+            gen_rirs_wave_unscaled = generated_rirs
+            gen_rirs_spec_unscaled = generated_rirs_spec_list
+        
+        # plot unscaled signals
+        create_base_plot_mode2(real_rirs_wave, gen_rirs_wave_unscaled, real_rirs_spec, gen_rirs_spec_unscaled,
                         conditions_np, rir_indices, sample_rate, args.save_path, title)
-        create_edc_plots_mode2(real_rirs_wave, generated_rirs, conditions_np, rir_indices, 
+        create_edc_plots_mode2(real_rirs_wave, gen_rirs_wave_unscaled, conditions_np, rir_indices, 
                       sample_rate, args.save_path, args.octaves, title)
+
     
     # Save audio files if requested
     if args.save_audio:
