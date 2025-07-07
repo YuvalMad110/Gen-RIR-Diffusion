@@ -31,6 +31,9 @@ from RIRDiffusionModel import RIRDiffusionModel
 from data.rir_dataset import load_rir_dataset
 from utils.signal_edc import create_edc_plots_mode2
 from utils.signal_proc import calculate_edc, estimate_decay_k_factor, undo_rir_scaling, apply_rir_scaling
+import glob
+import random
+from scipy.signal import convolve
 
 
 """
@@ -658,6 +661,161 @@ def save_generation_stats(generated_rirs: List[np.ndarray], conditions: np.ndarr
     
     print(f"Statistics saved to: {stats_path}")
 
+# --------------------------- Speech convolution ---------------------------
+def find_librispeech_files(speech_path: str, speech_id: Optional[List[str]] = None, n_speech_files: int = 3) -> List[str]:
+    """Find LibriSpeech audio files efficiently."""
+    speech_path = Path(speech_path)
+    
+    if speech_id is not None:
+        # Case 1: Specific speech_ids provided - look for speech_path/speech_id.wav for each ID
+        found_files = []
+        for sid in speech_id:
+            target_file = speech_path / f"{sid}.wav"
+            if target_file.exists():
+                found_files.append(str(target_file))
+                print(f"Found file: {target_file}")
+            else:
+                print(f"File not found: {target_file}")
+        
+        if not found_files:
+            print(f"No files found for speech_ids: {speech_id}")
+            return []
+        
+        print(f"Found {len(found_files)} files for {len(speech_id)} speech_ids")
+        return found_files
+    
+    else:
+        # Case 2: No speech_id - randomly sample n_speech_files efficiently
+        print(f"Searching for {n_speech_files} random audio files...")
+        
+        found_files = []
+        
+        # Use iterative sampling to avoid loading entire directory
+        for root, dirs, files in os.walk(speech_path):
+            for file in files:
+                if file.lower().endswith(('.wav', '.flac')):
+                    found_files.append(os.path.join(root, file))
+                    
+                    # stop after collecting 10x the requested rir (for randomness)
+                    if len(found_files) >= n_speech_files * 10:
+                        break
+            
+            if len(found_files) >= n_speech_files * 10:
+                break
+        
+        if not found_files:
+            print(f"No audio files found in {speech_path}")
+            return []
+        
+        # Randomly sample from collected files
+        n_files_to_use = min(n_speech_files, len(found_files))
+        selected_files = random.sample(found_files, n_files_to_use)
+        
+        print(f"Found {len(found_files)} audio files, selected {len(selected_files)}")
+        return selected_files
+
+def load_speech_file(file_path: str, target_sr: int = 22050, max_duration: float = 10.0) -> Tuple[np.ndarray, int]:
+    """Load and preprocess speech file."""
+    try:
+        audio, sr = librosa.load(file_path, sr=target_sr)
+        
+        # Limit duration if too long
+        max_samples = int(max_duration * target_sr)
+        if len(audio) > max_samples:
+            audio = audio[:max_samples]
+            
+        # Normalize audio
+        if np.max(np.abs(audio)) > 0:
+            audio = audio / np.max(np.abs(audio)) * 0.8
+            
+        return audio, target_sr
+        
+    except Exception as e:
+        print(f"Error loading {file_path}: {e}")
+        return None, None
+
+def convolve_speech_with_rir(speech: np.ndarray, rir: np.ndarray) -> np.ndarray:
+    """Convolve speech signal with RIR using scipy.signal.convolve."""
+    speech = speech.squeeze()
+    rir = rir.squeeze()
+    
+    # Normalize RIR to prevent amplification
+    if np.max(np.abs(rir)) > 0:
+        rir = rir / np.max(np.abs(rir))
+    
+    # Convolve speech with RIR
+    reverb_speech = convolve(speech, rir, mode='full')
+    
+    # Normalize output to prevent clipping
+    if np.max(np.abs(reverb_speech)) > 0:
+        reverb_speech = reverb_speech / np.max(np.abs(reverb_speech)) * 0.95
+    
+    return reverb_speech
+
+def process_speech_convolution(speech_path: str, speech_id: Optional[List[str]], 
+                             generated_rirs: List[np.ndarray], real_rirs: Optional[List[np.ndarray]],
+                             save_path: str, sr: int, n_speech_files: int = 3):
+    """Process speech files and convolve them with RIRs."""
+    print(f"\n=== Processing Speech Convolution ===")
+    
+    # Find speech files
+    speech_files = find_librispeech_files(speech_path, speech_id, n_speech_files)
+    if not speech_files:
+        print(f"XXXXXXX\nNo speech files found\nXXXXXXX")
+        return
+    print(f"Processing {len(speech_files)} speech files with {len(generated_rirs)} RIRs")
+    
+    # Create output directories
+    convolved_dir = Path(save_path) / "convolved_speech"
+    convolved_dir.mkdir(parents=True, exist_ok=True)
+    
+    clean_dir = convolved_dir / "clean"
+    gen_dir = convolved_dir / "generated_rir"
+    real_dir = convolved_dir / "real_rir"
+    
+    clean_dir.mkdir(exist_ok=True)
+    gen_dir.mkdir(exist_ok=True)
+    if real_rirs is not None:
+        real_dir.mkdir(exist_ok=True)
+    
+    # Process each speech file
+    for speech_idx, speech_file in enumerate(tqdm(speech_files, desc="Processing speech files")):
+        # Load speech
+        speech, speech_sr = load_speech_file(speech_file, target_sr=sr)
+        
+        if speech is None:
+            continue
+            
+        file_name = Path(speech_file).stem
+        
+        # Save clean speech
+        clean_path = clean_dir / f"clean_{speech_idx:02d}_{file_name}.wav"
+        sf.write(clean_path, speech, sr)
+        
+        # Convolve with each generated RIR
+        for rir_idx, gen_rir in enumerate(generated_rirs):
+            try:
+                reverb_speech = convolve_speech_with_rir(speech, gen_rir)
+                output_path = gen_dir / f"gen_rir_{rir_idx:02d}_speech_{speech_idx:02d}_{file_name}.wav"
+                sf.write(output_path, reverb_speech, sr)
+            except Exception as e:
+                print(f"Error convolving speech {speech_idx} with generated RIR {rir_idx}: {e}")
+        
+        # Convolve with each real RIR (if available)
+        if real_rirs is not None:
+            for rir_idx, real_rir in enumerate(real_rirs):
+                try:
+                    reverb_speech = convolve_speech_with_rir(speech, real_rir)
+                    output_path = real_dir / f"real_rir_{rir_idx:02d}_speech_{speech_idx:02d}_{file_name}.wav"
+                    sf.write(output_path, reverb_speech, sr)
+                except Exception as e:
+                    print(f"Error convolving speech {speech_idx} with real RIR {rir_idx}: {e}")
+    
+    print(f"Speech convolution completed!")
+    print(f"Clean speech files: {clean_dir}")
+    print(f"Generated RIR convolutions: {gen_dir}")
+    if real_rirs is not None:
+        print(f"Real RIR convolutions: {real_dir}")
 
 def main():
     parser = argparse.ArgumentParser(description="Generate RIRs using trained diffusion model")
@@ -666,8 +824,8 @@ def main():
                     help="Mode 1: Random conditions, Mode 2: Dataset conditions with comparison")
     parser.add_argument('--nSamples', type=int, default=128, 
                         help="Only take effect for old runs where data_info['nSamples'] is not available. Number of samples to load from dataset.")
-    parser.add_argument("--model_path", type=str, 
-                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Jul02_18-11-05_dsief06/model_best.pth.tar',
+    parser.add_argument("--model_path", type=str,
+                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Jul02_19-01-47_dsief06/model_best.pth.tar',
                     help="Path to the trained model checkpoint (.pth.tar)")
     parser.add_argument("--save_path", type=str, default=None,
                     help="Directory to save generated plots and audio")
@@ -681,6 +839,13 @@ def main():
                     help="Random seed for reproducible generation")
     parser.add_argument("--dataset_path", type=str, default=os.path.normpath('./datasets/GTU_rir/GTU_RIR.pickle.dat'),
                     help="Path to dataset (required for mode 2)")
+    # Speech convolution arguments
+    parser.add_argument("--speech_path", type=str, default='/dsi/gannot-lab1/datasets/LibriSpeech/LibriSpeech/Train/1195/130164/', # /dsi/gannot-lab1/datasets/LibriSpeech/LibriSpeech/Train/1195/130164/
+                    help="Path to LibriSpeech dataset for speech convolution")
+    parser.add_argument("--speech_id", type=str, nargs='+', default=['1195-130164-0010','1195-130164-0010'],
+                    help="Optional speaker ID to filter LibriSpeech files")
+    parser.add_argument("--n_speech_files", type=int, default=2,
+                    help="Number of speech files to process for convolution")
     # --- Parameters ---
     parser.add_argument("--n_timesteps", type=int, default=None,
                     help="None for the n_timesteps used in training, otherwise specify the number of timesteps for generation")
@@ -741,7 +906,6 @@ def main():
         config['n_timesteps'] = args.n_timesteps
     print(f"Using sample rate: {sample_rate} Hz and {config['n_timesteps']} timesteps for generation")
     title = f"sr: {sr_target}Hz, nTimesteps: {config['n_timesteps']}\nhop_length: {hop_length}, n_fft: {n_fft}, sample_max_sec: {sample_max_sec}"
-    
     # -------------- Generate or load conditions based on mode --------------
     if args.mode == 1:
         # Mode 1: Random conditions
@@ -785,6 +949,7 @@ def main():
             gen_rirs_wave_unscaled, gen_rirs_spec_unscaled, real_rirs_wave_scaled, real_rirs_spec_scaled = prepare_scaled_unscaled_datasets(
                 real_rirs_wave, generated_rirs, k_factors, sr_target, n_fft, hop_length)
             full_save_path = os.path.join(args.save_path, 'rirs_comparison_mode2_scaled.png')
+            # reverb speech
             create_base_plot_mode2(real_rirs_wave_scaled, generated_rirs, real_rirs_spec_scaled, generated_rirs_spec_list,
                         conditions_np, rir_indices, sample_rate, full_save_path, f"**Scaled Signal**\n{title}")
             full_save_path = os.path.join(args.save_path, 'edc_comparison_mode2_scaled.png')
@@ -793,7 +958,15 @@ def main():
         else:
             gen_rirs_wave_unscaled = generated_rirs
             gen_rirs_spec_unscaled = generated_rirs_spec_list
-        
+            
+        # Process speech convolution if speech_path is provided
+        if args.speech_path:
+            process_speech_convolution(
+                args.speech_path, args.speech_id, 
+                gen_rirs_wave_unscaled, real_rirs_wave,
+                args.save_path, sample_rate, args.n_speech_files
+            )
+        return
         # plot unscaled signals
         create_base_plot_mode2(real_rirs_wave, gen_rirs_wave_unscaled, real_rirs_spec, gen_rirs_spec_unscaled,
                         conditions_np, rir_indices, sample_rate, args.save_path, title)
