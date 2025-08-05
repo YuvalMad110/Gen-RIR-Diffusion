@@ -242,7 +242,7 @@ def calculate_edc(rir: torch.Tensor) -> torch.Tensor:
     edc = edc / (torch.max(edc, dim=-1, keepdim=True)[0] + 1e-12)
     return edc
 
-def estimate_decay_k_factor(edc: torch.Tensor, sr: float, db_cutoff: float = -40.0) -> torch.Tensor:
+def estimate_decay_k_factor(edc: torch.Tensor, sr: float, db_cutoff: float = -40.0) -> Tuple[torch.Tensor, List[int]]:
     """
     Estimate exponential decay rate k from EDC using least squares fit.
     
@@ -252,42 +252,47 @@ def estimate_decay_k_factor(edc: torch.Tensor, sr: float, db_cutoff: float = -40
         db_cutoff: dB cutoff for EDC cropping
     
     Returns:
-        Decay rate k for each sample in batch [batch]
+        Tuple of (decay rate k for each sample [batch], crop indices for each sample [batch])
     """
-    # Crop EDC by dB cutoff
+    # Convert to dB
     edc_db = 10 * torch.log10(edc + 1e-12)
     
-    # Find crop index for each sample in batch
+    batch_size = edc.shape[0]
+    k_values = []
     crop_indices = []
-    for i in range(edc.shape[0]):
+    
+    # Pre-generate full time vector
+    t_full = torch.arange(edc.shape[1], dtype=torch.float32, device=edc.device) / sr
+    
+    # Process each sample individually with its own cutoff
+    for i in range(batch_size):
+        # Find crop index for this specific sample
         cutoff_mask = edc_db[i] < db_cutoff
         if cutoff_mask.any():
             crop_idx = torch.where(cutoff_mask)[0][0].item()
         else:
             crop_idx = edc.shape[1]  # Use full length if no cutoff found
+        
         crop_indices.append(crop_idx)
+        
+        # Crop this sample's EDC and time vector
+        cropped_edc = edc[i, :crop_idx]
+        t = t_full[:crop_idx]
+        log_edc = torch.log(cropped_edc + 1e-12)
+        
+        # Least squares fitting: log_edc = slope * t + intercept
+        A = torch.stack([t, torch.ones_like(t)], dim=1)  # [seq_len, 2]
+        
+        # Normal equation: (A^T A)^-1 A^T b
+        AtA = torch.mm(A.T, A)  # [2, 2]
+        Atb = torch.mv(A.T, log_edc)  # [2]
+        solution = torch.linalg.solve(AtA, Atb)  # [2]
+        slope = solution[0]
+        
+        k = -slope / 2
+        k_values.append(k)
     
-    # Crop to minimum index to keep batch uniform
-    min_crop_idx = min(crop_indices)
-    cropped_edc = edc[:, :min_crop_idx]
-    
-    # Estimate decay rate
-    batch_size, seq_len = cropped_edc.shape
-    t = torch.arange(seq_len, dtype=torch.float32, device=cropped_edc.device) / sr
-    log_edc = torch.log(cropped_edc + 1e-12)
-    
-    # Least squares fitting: log_edc = slope * t + intercept
-    A = torch.stack([t, torch.ones_like(t)], dim=0).T
-    A = A.unsqueeze(0).expand(batch_size, -1, -1)
-    
-    AtA = torch.bmm(A.transpose(-2, -1), A)
-    Atb = torch.bmm(A.transpose(-2, -1), log_edc.unsqueeze(-1))
-    
-    solution = torch.linalg.solve(AtA, Atb)
-    slope = solution[:, 0, 0]
-    k = -slope / 2
-    
-    return k
+    return torch.stack(k_values), crop_indices
 
 def apply_rir_scaling(rir: torch.Tensor, k: torch.Tensor, sr: float) -> torch.Tensor:
     """
@@ -325,7 +330,7 @@ def undo_rir_scaling(scaled_rir: torch.Tensor, k: torch.Tensor, sr: float) -> to
     inverse_scaling_factor = torch.exp(-k.unsqueeze(-1) * t_full.unsqueeze(0))
     return scaled_rir * inverse_scaling_factor
 
-def scale_rir(rir: torch.Tensor, sr: float, db_cutoff: float = -40.0) -> torch.Tensor:
+def scale_rir(rir: torch.Tensor, sr: float, db_cutoff: float = -40.0, apply_zero_tail: bool = False) -> torch.Tensor:
     """
     Scale RIR by estimating and compensating for natural decay.
     
@@ -333,6 +338,7 @@ def scale_rir(rir: torch.Tensor, sr: float, db_cutoff: float = -40.0) -> torch.T
         rir: Time-domain RIR tensor [batch, time]
         sr: Sample rate
         db_cutoff: dB cutoff for EDC cropping
+        apply_zero_tail: Whether to zero out signal after db_cutoff point
     
     Returns:
         Scaled RIR tensor
@@ -340,10 +346,19 @@ def scale_rir(rir: torch.Tensor, sr: float, db_cutoff: float = -40.0) -> torch.T
     # Calculate EDC
     edc = calculate_edc(rir)
     
-    # Estimate decay rate k
-    k = estimate_decay_k_factor(edc, sr, db_cutoff)
+    # Estimate decay rate k and get crop indices
+    k, crop_indices = estimate_decay_k_factor(edc, sr, db_cutoff)
     
     # Apply scaling
+    scaled_rir = apply_rir_scaling(rir, k, sr)
+    
+    # Apply zero tail if requested
+    if apply_zero_tail:
+        for i, crop_idx in enumerate(crop_indices):
+            scaled_rir[i, crop_idx:] = 0.0
+    
+    return scaled_rir
+
 # ------------------------------------------------------------------------
 #                       Miscellaneous
 # ------------------------------------------------------------------------

@@ -18,7 +18,7 @@ from trainer import DiffusionTrainer
 from utils.signal_scaling2 import scaled_rir_collate_fn
 
 # CUDA_VISIBLE_DEVICES=0,1,2,3 /home/yuvalmad/python312/bin/accelerate launch --multi_gpu --num_processes=4 ./Projects/Gen-RIR-Diffusion/run_train.py --batch-size 16 --epochs 100 --nSamples 128
-# 
+
 def get_datasets_folder():
     """
     Returns the path to the dataset folder based on the platform (local PC or server).
@@ -38,7 +38,8 @@ def gather_data_info(args, dataloader):
                  "sr_target": args.sr_target,
                  "nSamples": args.nSamples,
                  "db_cutoff": args.db_cutoff,
-                 "scale_rir": args.scale_rir
+                 "scale_rir": args.scale_rir,
+                 "apply_zero_tail": args.apply_zero_tail
                  }
     return data_info
     
@@ -61,6 +62,7 @@ def parse_args():
     parser.add_argument('--n-fft', type=int, default=256)
     parser.add_argument('--sr-target', type=int, default=22050, help="Target sampling rate for the RIRs, if None, use original sampling rate")
     parser.add_argument('--scale-rir', type=bool, default=True)
+    parser.add_argument('--apply-zero-tail', type=bool, default=True, help="Will zero all values of the RIR after -40db (only when scale_rir==True)")
     parser.add_argument('--db-cutoff', type=float, default=-40.0, help='dB cutoff for EDC cropping in rir scaling')
 
     return parser.parse_args()
@@ -97,12 +99,13 @@ def get_sample_size(dataloader):
 def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # ---------- dataset ----------
     dataset = load_rir_dataset('gtu', args.dataset_path, mode='raw',hop_length=args.hop_length, n_fft=args.n_fft,
                                 use_spectrogram=True, sample_max_sec=args.sample_max_sec, nSamples=args.nSamples, sr_target=args.sr_target)
     
     collate_fn = scale_and_spectrogram_collate_fn(sr=args.sr_target, db_cutoff=args.db_cutoff, n_fft=args.n_fft, hop_length=args.hop_length, 
-                                                  scale_rir_flag=args.scale_rir, use_spectrogram=True)
+                                                  scale_rir_flag=args.scale_rir, use_spectrogram=True, apply_zero_tail=args.apply_zero_tail)
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
