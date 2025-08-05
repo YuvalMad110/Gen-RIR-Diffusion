@@ -30,7 +30,7 @@ from diffusers import DDPMScheduler
 from RIRDiffusionModel import RIRDiffusionModel
 from data.rir_dataset import load_rir_dataset
 from utils.signal_edc import create_edc_plots_mode2
-from utils.signal_proc import calculate_edc, estimate_decay_k_factor, undo_rir_scaling, apply_rir_scaling
+from utils.signal_proc import calculate_edc, estimate_decay_k_factor, undo_rir_scaling, apply_rir_scaling, normalize_signals
 import glob
 import random
 from scipy.signal import convolve
@@ -218,7 +218,7 @@ def load_dataset_conditions(dataset, nRIR: int, data_info: dict, use_spectrogram
         edc = calculate_edc(real_rirs_tensor)
         sr_target = data_info.get('sr_target', 22050)
         db_cutoff = data_info.get('db_cutoff', -40.0)
-        k_factors = estimate_decay_k_factor(edc, sr_target, db_cutoff)
+        k_factors, _ = estimate_decay_k_factor(edc, sr_target, db_cutoff)
         print(f"Calculated k-factors for unscaling: {k_factors}")
     
     return conditions_tensor, real_rirs_waveform, real_rirs_spectrogram, rir_indices, k_factors
@@ -314,7 +314,7 @@ def generate_rirs_batch(model: RIRDiffusionModel, conditions: torch.Tensor, devi
     with torch.no_grad():
         for i, t in enumerate(tqdm(scheduler.timesteps, desc="Denoising")):
             # Prepare timestep
-            timestep = t.expand(batch_size).to(device)
+            timestep = torch.full((batch_size,), t, device=device, dtype=torch.long)
             
             # Model forward pass
             try:
@@ -825,7 +825,7 @@ def main():
     parser.add_argument('--nSamples', type=int, default=128, 
                         help="Only take effect for old runs where data_info['nSamples'] is not available. Number of samples to load from dataset.")
     parser.add_argument("--model_path", type=str,
-                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Jul02_19-01-47_dsief06/model_best.pth.tar',
+                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Jul08_00-02-02_dsief08/model_best.pth.tar',
                     help="Path to the trained model checkpoint (.pth.tar)")
     parser.add_argument("--save_path", type=str, default=None,
                     help="Directory to save generated plots and audio")
@@ -846,6 +846,8 @@ def main():
                     help="Optional speaker ID to filter LibriSpeech files")
     parser.add_argument("--n_speech_files", type=int, default=2,
                     help="Number of speech files to process for convolution")
+    parser.add_argument("--norm_rir", type=bool, default=True,
+                    help="Normalize RIRs before generating reverbed speech")
     # --- Parameters ---
     parser.add_argument("--n_timesteps", type=int, default=None,
                     help="None for the n_timesteps used in training, otherwise specify the number of timesteps for generation")
@@ -961,11 +963,15 @@ def main():
             
         # Process speech convolution if speech_path is provided
         if args.speech_path:
-            process_speech_convolution(
-                args.speech_path, args.speech_id, 
-                gen_rirs_wave_unscaled, real_rirs_wave,
-                args.save_path, sample_rate, args.n_speech_files
-            )
+            if args.norm_rir:
+                # Normalize RIRs before reverbed speech generation
+                real_rirs_wave_norm = normalize_signals(real_rirs_wave)
+                gen_rirs_wave_unscaled_norm = normalize_signals(gen_rirs_wave_unscaled)
+                process_speech_convolution(args.speech_path, args.speech_id, gen_rirs_wave_unscaled_norm, real_rirs_wave_norm,
+                                            args.save_path, sample_rate, args.n_speech_files)
+            else:
+                process_speech_convolution(args.speech_path, args.speech_id, gen_rirs_wave_unscaled, real_rirs_wave,
+                                        args.save_path, sample_rate, args.n_speech_files)
         return
         # plot unscaled signals
         create_base_plot_mode2(real_rirs_wave, gen_rirs_wave_unscaled, real_rirs_spec, gen_rirs_spec_unscaled,

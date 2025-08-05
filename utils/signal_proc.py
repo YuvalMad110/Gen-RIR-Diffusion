@@ -2,6 +2,7 @@ import librosa
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from typing import List, Tuple
 
 # ------------------------------------------------------------------------
 #                       Signal Transformations
@@ -343,5 +344,28 @@ def scale_rir(rir: torch.Tensor, sr: float, db_cutoff: float = -40.0) -> torch.T
     k = estimate_decay_k_factor(edc, sr, db_cutoff)
     
     # Apply scaling
-    return apply_rir_scaling(rir, k, sr)
-
+# ------------------------------------------------------------------------
+#                       Miscellaneous
+# ------------------------------------------------------------------------
+def normalize_signals(signals: List[np.ndarray]) -> List[np.ndarray]:
+    """
+    Normalize a list of RIRs to unit maximum amplitude.
+    
+    Args:
+        signals: List of RIR waveforms
+        
+    Returns:
+        List of normalized RIR waveforms
+    """
+    normalized_signals = []
+    
+    for i, sig in enumerate(signals):
+        if np.max(np.abs(sig)) > 0:
+            norm_sig = sig / np.max(np.abs(sig))
+        else:
+            # Handle case where RIR is all zeros
+            norm_sig = sig.copy()
+            
+        normalized_signals.append(norm_sig)
+    
+    return normalized_signals

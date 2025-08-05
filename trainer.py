@@ -175,7 +175,6 @@ class DiffusionTrainer():
                 'n_timesteps': self.n_timesteps,
                 'sample_size': self.data_info.get('sample_size', None),
                 'data_info': self.data_info,
-                # 'hop_length': self.hop_length,
                 'state_dict': model_unwrapped.state_dict(),
                 'optimizer': self.optimizer.state_dict(),
                 'loss_per_epoch': loss_per_epoch,
