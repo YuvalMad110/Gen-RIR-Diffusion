@@ -66,7 +66,8 @@ def load_model_and_config(model_path: str, device: torch.device) -> Tuple[RIRDif
         'n_timesteps': checkpoint.get('n_timesteps', 1000),
         'use_cond_encoder': checkpoint.get('use_cond_encoder', False),
         'light_mode': checkpoint.get('light_mode', False),
-        'data_info': checkpoint.get('data_info', {})
+        'data_info': checkpoint.get('data_info', {}),
+        'losses_per_epoch': checkpoint.get('losses_per_epoch', {})
     }
     
     # Initialize model with config
@@ -606,60 +607,21 @@ def save_audio_files(rirs: List[np.ndarray], save_path: str, sr: int = 22050, pr
     
     print(f"{prefix.capitalize()} audio files saved to: {audio_dir}")
 
-def save_generation_stats(generated_rirs: List[np.ndarray], conditions: np.ndarray, config: dict, 
-                         model_path: str, save_path: str, sr: int, mode: int, 
-                         real_rirs: Optional[List[np.ndarray]] = None, rir_indices: Optional[List[int]] = None):
-    """Save generation statistics and parameters."""
-    condition_names = [
-        'room_length', 'room_width', 'room_height',
-        'mic_x', 'mic_y', 'mic_z',
-        'speaker_x', 'speaker_y', 'speaker_z',
-        'rt60'
-    ]
-    
-    # Analyze conditions
-    conditions_analysis = {}
-    for i, name in enumerate(condition_names):
-        values = conditions[:, i]
-        conditions_analysis[name] = {
-            'mean': float(np.mean(values)),
-            'std': float(np.std(values)),
-            'min': float(np.min(values)),
-            'max': float(np.max(values)),
-            'values': values.tolist()
-        }
-    
-    # Overall statistics
-    stats = {
-        "mode": mode,
-        "n_generated": len(generated_rirs),
-        "sample_rate": sr,
+def save_model_samples(generated_rirs: List[np.ndarray], generated_specs: List[np.ndarray], conditions: np.ndarray, config: dict, 
+                         model_path: str, nRIR: int, rir_indices: List[int], save_path: str):
+    save_dict = {
+        "generated_rirs": generated_rirs,
+        "generated_specs": generated_specs,
+        "conditions": conditions,
+        "config": config,
         "model_path": model_path,
-        "generated_waveform_lengths": [len(rir) for rir in generated_rirs],
-        "generated_max_amplitudes": [float(np.max(np.abs(rir))) for rir in generated_rirs],
-        "model_config": {
-            "sample_size": config['sample_size'],
-            "n_timesteps": config['n_timesteps'],
-            "use_cond_encoder": config['use_cond_encoder'],
-            "light_mode": config['light_mode']
-        },
-        "data_info": config.get('data_info', {}),
-        "conditions_analysis": conditions_analysis
+        "nRIR": nRIR,
+        "rir_indices": rir_indices
     }
     
-    # Add mode 2 specific stats
-    if mode == 2 and real_rirs is not None:
-        stats.update({
-            "dataset_indices": rir_indices,
-            "real_waveform_lengths": [len(rir) for rir in real_rirs],
-            "real_max_amplitudes": [float(np.max(np.abs(rir))) for rir in real_rirs]
-        })
-    
-    stats_path = Path(save_path) / f"generation_stats_mode{mode}.json"
-    with open(stats_path, 'w') as f:
-        json.dump(stats, f, indent=2)
-    
-    print(f"Statistics saved to: {stats_path}")
+    full_save_path = Path(save_path) / f"model_samples.pt"
+    torch.save(save_dict, full_save_path)
+    print(f"Statistics saved to: {full_save_path}")
 
 # --------------------------- Speech convolution ---------------------------
 def find_librispeech_files(speech_path: str, speech_id: Optional[List[str]] = None, n_speech_files: int = 3) -> List[str]:
@@ -825,7 +787,7 @@ def main():
     parser.add_argument('--nSamples', type=int, default=128, 
                         help="Only take effect for old runs where data_info['nSamples'] is not available. Number of samples to load from dataset.")
     parser.add_argument("--model_path", type=str,
-                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Jul08_00-02-02_dsief08/model_best.pth.tar',
+                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Aug06_23-54-27_dgx03/model_best.pth.tar',
                     help="Path to the trained model checkpoint (.pth.tar)")
     parser.add_argument("--save_path", type=str, default=None,
                     help="Directory to save generated plots and audio")
@@ -919,12 +881,25 @@ def main():
     else:
         # Mode 2: Load from dataset
         print("Mode 2: Loading conditions from dataset...")
-        # Load dataset
-        dataset = load_rir_dataset(
-            'gtu', args.dataset_path, mode='raw', nSamples=nSamples,
-            hop_length=hop_length, n_fft=n_fft, sr_target=sr_target,
-            use_spectrogram=use_spectrogram, sample_max_sec=sample_max_sec
-        )        
+        # Load dataset  
+        _, eval_dataset, _ = load_rir_dataset(
+            name='gtu', 
+            path=args.dataset_path,
+            split=True,
+            mode='raw',
+            hop_length=hop_length, 
+            n_fft=n_fft,
+            use_spectrogram=use_spectrogram, 
+            sample_max_sec=sample_max_sec, 
+            nSamples=nSamples, 
+            sr_target=sr_target,
+            train_ratio=data_info['train_ratio'],
+            eval_ratio=data_info['eval_ratio'],
+            test_ratio=data_info['test_ratio'],
+            random_seed=data_info['random_seed'],
+            split_by_room=data_info['split_by_room']
+        )  
+        dataset = eval_dataset
         # Load conditions and real RIRs
         conditions, real_rirs_wave, real_rirs_spec, rir_indices, k_factors = load_dataset_conditions(
             dataset, args.nRIR, data_info, use_spectrogram, args.rir_indices
@@ -972,7 +947,6 @@ def main():
             else:
                 process_speech_convolution(args.speech_path, args.speech_id, gen_rirs_wave_unscaled, real_rirs_wave,
                                         args.save_path, sample_rate, args.n_speech_files)
-        return
         # plot unscaled signals
         create_base_plot_mode2(real_rirs_wave, gen_rirs_wave_unscaled, real_rirs_spec, gen_rirs_spec_unscaled,
                         conditions_np, rir_indices, sample_rate, args.save_path, title)
@@ -988,8 +962,8 @@ def main():
     
     # Save statistics
     if args.save_inference:
-        save_generation_stats(generated_rirs, conditions_np, config, args.model_path, 
-                            args.save_path, sample_rate, args.mode, real_rirs, rir_indices)
+        save_model_samples(generated_rirs, generated_specs, conditions_np, config, args.model_path, 
+                            args.nRIR, rir_indices, args.save_path)
     
     print(f"\n Generation completed successfully!")
     print(f" Results saved to: {save_path}")
