@@ -1,5 +1,6 @@
 import os
 import socket
+import argparse
 import shutil
 import matplotlib.pyplot as plt
 import torch
@@ -252,3 +253,10 @@ def plot_signals(signals, legend=None, title="Signal Plot", save_path=None):
     
     # Show the plot (this will open in VS Code if running in VS Code)
     plt.show()
+
+def str2bool(v):
+    if isinstance(v, bool): return v
+    v = v.lower()
+    if v in ("yes","true","t","1","y","on"): return True
+    if v in ("no","false","f","0","n","off"): return False
+    raise argparse.ArgumentTypeError("Boolean value expected.")

@@ -1,5 +1,5 @@
-# run_train.py (clean version with train/eval/test splits)
 import os
+import json
 import argparse
 from accelerate import Accelerator
 import torch
@@ -15,9 +15,17 @@ from data.dataset_collate_fn import scale_and_spectrogram_collate_fn
 from RIRDiffusionModel import RIRDiffusionModel
 from diffusers import DDPMScheduler
 from trainer import DiffusionTrainer
+from utils.misc import str2bool
 from utils.signal_scaling2 import scaled_rir_collate_fn
+"""
+CUDA_VISIBLE_DEVICES=1,2,3 /home/yuvalmad/python312/bin/accelerate launch --multi_gpu --num_processes=3 ./Projects/Gen-RIR-Diffusion/run_train.py --batch-size 16 --epochs 100 --nSamples 128 \
+|& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
 
-# CUDA_VISIBLE_DEVICES=0,1,2,3 /home/yuvalmad/python312/bin/accelerate launch --multi_gpu --num_processes=4 ./Projects/Gen-RIR-Diffusion/run_train.py --batch-size 16 --epochs 100 --nSamples 128
+CUDA_VISIBLE_DEVICES=3 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --batch-size 16 --epochs 100 --nSamples 128 \
+|& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
+"""
+# CUDA_VISIBLE_DEVICES=1,2,3 /home/yuvalmad/python312/bin/accelerate launch --multi_gpu --num_processes=3 ./Projects/Gen-RIR-Diffusion/run_train.py --batch-size 16 --epochs 100 --nSamples 128 \
+
 
 # ------------------------- Utils --------------------------
 def parse_args():
@@ -34,27 +42,25 @@ def parse_args():
     parser.add_argument('--workers', type=int, default=10)
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--n-timesteps', type=int, default=1000)
-    parser.add_argument('--light-mode', type=bool, default=False)
     parser.add_argument('--checkpoint-freq', type=int, default=5)
     parser.add_argument('--eval-freq', type=int, default=1, help='Evaluate every N epochs')
-    parser.add_argument('--use-cond-encoder', type=bool, default=False)
-    parser.add_argument('--use-eval', type=bool, default=True, help='Use evaluation dataset during training')
+    parser.add_argument('--use-eval', type=str2bool, default=True, help='Use evaluation dataset during training')
     
     # Dataset specific arguments
     parser.add_argument('--sample-max-sec', type=int, default=1, help="None for no limit, otherwise in samples")
-    parser.add_argument('--nSamples', type=int, default=128, help="Number of samples to use from the dataset, None for all")
+    parser.add_argument('--nSamples', type=int, default=None, help="Number of samples to use from the dataset, None for all")
     parser.add_argument('--hop-length', type=int, default=64)
     parser.add_argument('--n-fft', type=int, default=256)
     parser.add_argument('--sr-target', type=int, default=22050, help="Target sampling rate for the RIRs, if None, use original sampling rate")
-    parser.add_argument('--scale-rir', type=bool, default=True)
-    parser.add_argument('--apply-zero-tail', type=bool, default=True, help="Will zero all values of the RIR after -40db (only when scale_rir==True)")
+    parser.add_argument('--scale-rir', type=str2bool, default=True)
+    parser.add_argument('--apply-zero-tail', type=str2bool, default=True, help="Will zero all values of the RIR after -40db (only when scale_rir==True)")
     parser.add_argument('--db-cutoff', type=float, default=-40.0, help='dB cutoff for EDC cropping in rir scaling')
     
     # Data split arguments
     parser.add_argument('--train-ratio', type=float, default=0.7, help='Proportion of data for training')
     parser.add_argument('--eval-ratio', type=float, default=0.15, help='Proportion of data for evaluation')
     parser.add_argument('--test-ratio', type=float, default=0.15, help='Proportion of data for testing')
-    parser.add_argument('--split-by-room', type=bool, default=False, help='Split by room IDs to avoid data leakage')
+    parser.add_argument('--split-by-room', type=str2bool, default=False, help='Split by room IDs to avoid data leakage')
     parser.add_argument('--random-seed', type=int, default=42, help='Random seed for reproducible splits')
 
     return parser.parse_args()
@@ -132,13 +138,14 @@ def main():
     # ---------- debug mode ----------
     debug_mode = False
     if debug_mode:
+        print("\nXXXXXXX\n Running in DEBUG mode!!!! \nXXXXXXX\n")
         args.batch_size = 2
         args.epochs = 2
         args.nSamples = 14
         args.split_by_room = False
         
     # ---------- Load datasets ----------
-    print("Loading datasets with splits...")
+    print("\n----------- Loading datasets... -----------\n")
     train_dataset, eval_dataset, test_dataset = load_rir_dataset(
         name='gtu', 
         path=args.dataset_path,
@@ -167,9 +174,11 @@ def main():
         collate_fn=collate_fn, drop_last=True, pin_memory=torch.cuda.is_available())
 
     eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
-        collate_fn=collate_fn, drop_last=True, pin_memory=torch.cuda.is_available())
+        collate_fn=collate_fn, drop_last=False, pin_memory=torch.cuda.is_available())
     
     data_info = gather_data_info(args, train_dataloader)
+    print(f"\nxxxxxxx\nDataloader splits: {len(train_dataloader)} - {len(eval_dataloader)}\nxxxxxxx\n")
+
 
     # ---------- Model ----------
     # load model config from json and initialize the model
@@ -182,6 +191,8 @@ def main():
         n_timesteps=args.n_timesteps,
         **model_config  # Unpack all model configuration parameters
     )
+    print("\n---------- Initialized model ----------\n")
+    
     # Scheduler 
     noise_scheduler = DDPMScheduler(num_train_timesteps=args.n_timesteps)
     # Optimizer 
@@ -203,10 +214,30 @@ def main():
     )
     
     # ---------- Train ----------
+    print("\n---------- Starting training... ----------\n")
     model_path = trainer.train(train_dataloader=train_dataloader, eval_dataloader=eval_dataloader)
 
-    torch.save(args, os.path.join(model_path, 'run_args.pth'))
-    print('Training finished!')
+    # ---------- Save model and training arguments ----------
+    if accelerator.is_main_process:
+        # Save training arguments and model configuration
+        torch.save(args, os.path.join(model_path, 'run_args.pth'))
+
+        # Save the model configuration used for this training
+        model_config_path = os.path.join(model_path, 'model_config.json')
+        with open(model_config_path, 'w') as f:
+            json.dump(model.config, f, indent=2)
+        
+        print('\n---------- Training finished successfully!! ----------\n')
+
+    # ---------- Distroy Process Group ----------
+    # Wait for main process to finish saving files
+    accelerator.wait_for_everyone()
+    
+    # Clean up distributed training (optional but recommended)
+    if accelerator.num_processes > 1:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 if __name__ == '__main__':
     main()

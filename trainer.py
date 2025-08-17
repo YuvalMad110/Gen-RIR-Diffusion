@@ -72,6 +72,7 @@ class DiffusionTrainer():
         best_model_dict = None
         self.train_dataloader_len = len(train_dataloader)
         self.eval_dataloader_len = len(eval_dataloader)
+        new_logdir = os.path.join(os.path.dirname(os.path.dirname(self.logdir)), 'finished', os.path.basename(self.logdir))
         
         # ============= Prepare with accelerator =============
         self.model, self.optimizer, train_dataloader, eval_dataloader = self.accelerator.prepare(
@@ -82,7 +83,7 @@ class DiffusionTrainer():
                         f"          [Accelerator] is_distributed: {self.accelerator.distributed_type != 'NO'} | nProcesses: {self.accelerator.num_processes} | Device: {self.accelerator.device}\n"
                         f"          [Dataloader] Train size: {len(train_dataloader.dataset)} | len(train_loader): {len(train_dataloader)} | Val size: {len(eval_dataloader.dataset)}\n"
                         f"          [RunParams] Epochs: {self.epochs} | Batch size: {math.ceil(len(train_dataloader.dataset) / len(train_dataloader))} | Eval freq: {self.eval_freq}\n"
-                        f"          [Model] LR: {self.lr} | Sample-Size: {self.data_info["sample_size"]} | n_timesteps: {self.n_timesteps}\n"
+                        f"          [Model] LR: {self.lr} | Sample-Size: {self.data_info["sample_size"]} | n_timesteps: {self.n_timesteps}\n" #  | nParams: {self.model.count_parameters()}
                         f"          [Data] {self.data_info}\n\n")
             
         # ============= Start Epoch loop =============
@@ -108,7 +109,6 @@ class DiffusionTrainer():
             self._plot_all_metrics(losses_per_epoch)
             
             # move run outputs to the finished folder
-            new_logdir = os.path.join(os.path.dirname(os.path.dirname(self.logdir)), 'finished', os.path.basename(self.logdir))
             shutil.move(self.logdir, new_logdir)
             
             # final log
@@ -127,7 +127,7 @@ class DiffusionTrainer():
         epoch_loss = 0.0
         epoch_norm_loss = 0.0
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{self.epochs} [Train]")
-        
+
         for rir, room_dim, mic_loc, speaker_loc, rt60 in progress_bar:
             loss_value, norm_loss_value = self._forward_step(rir, room_dim, mic_loc, speaker_loc, rt60, training=True, scaler=scaler)
             
