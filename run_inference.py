@@ -71,13 +71,29 @@ def load_model_and_config(model_path: str, device: torch.device) -> Tuple[RIRDif
     }
     
     # Initialize model with config
-    model = RIRDiffusionModel(
-        device=device,
-        sample_size=config['sample_size'],
-        n_timesteps=config['n_timesteps'],
-        use_cond_encoder=config['use_cond_encoder'],
-        light_mode=config['light_mode']
-    )
+    # Path to the config file in the same directory
+    config_path = os.path.join(os.path.dirname(model_path), "model_config.json")
+
+    # Check if it exists, and load it if yes
+    if os.path.isfile(config_path):
+        # New model with json file
+        with open(config_path, "r") as f:
+            model_config = json.load(f)
+        [model_config.pop(k, None) for k in ("n_timesteps", "cross_attention_dim","down_block_types","up_block_types","mid_block_type")]
+        model = RIRDiffusionModel(
+                device=device,
+                n_timesteps=config['n_timesteps'],
+                **model_config  # Unpack all model configuration parameters
+            )
+    else:
+        # Old model 
+        model = RIRDiffusionModel(
+                device=device,
+                sample_size=config['sample_size'],
+                n_timesteps=config['n_timesteps'],
+                use_cond_encoder=config['use_cond_encoder'],
+                light_mode=config.get('light_mode', False)
+            )    
     
     # Load model weights
     model.load_state_dict(checkpoint['state_dict'])

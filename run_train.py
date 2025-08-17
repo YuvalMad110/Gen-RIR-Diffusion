@@ -22,6 +22,11 @@ from utils.signal_scaling2 import scaled_rir_collate_fn
 # ------------------------- Utils --------------------------
 def parse_args():
     parser = argparse.ArgumentParser()
+    # Model configuration
+    parser.add_argument('--model-config', type=str, default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/model_config_medium.json',
+                        help='Path to model configuration JSON file')
+    
+    # Training configuration
     parser.add_argument('--dataset-path', type=str, default=get_datasets_folder())
     parser.add_argument('--batch-size', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=100)
@@ -53,6 +58,15 @@ def parse_args():
     parser.add_argument('--random-seed', type=int, default=42, help='Random seed for reproducible splits')
 
     return parser.parse_args()
+
+def load_model_config(config_path):
+    """Load model configuration from JSON file."""
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Model configuration file not found: {config_path}")
+    
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    return config
 
 def num_workers_test(dataset, nWorkers=[0,1,4,8,10, 12, 14, 16,18], batch_size=16):
     """
@@ -158,12 +172,15 @@ def main():
     data_info = gather_data_info(args, train_dataloader)
 
     # ---------- Model ----------
+    # load model config from json and initialize the model
+    with open(args.model_config, 'r') as f:
+        model_config = json.load(f)
+
     model = RIRDiffusionModel(
-        device=device, 
-        sample_size=data_info['sample_size'], 
-        n_timesteps=args.n_timesteps, 
-        use_cond_encoder=args.use_cond_encoder,
-        light_mode=args.light_mode
+        device=device,
+        sample_size=data_info['sample_size'],
+        n_timesteps=args.n_timesteps,
+        **model_config  # Unpack all model configuration parameters
     )
     # Scheduler 
     noise_scheduler = DDPMScheduler(num_train_timesteps=args.n_timesteps)

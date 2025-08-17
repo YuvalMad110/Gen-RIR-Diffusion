@@ -252,8 +252,8 @@ class DiffusionTrainer():
             best_model_dict = {
                 'epoch': epoch + 1,
                 'use_cond_encoder': model_unwrapped.use_cond_encoder,
-                'light_mode': model_unwrapped.light_mode,
                 'model_nParams': model_unwrapped.count_parameters(),
+                'model_config': model_unwrapped.config,
                 'n_timesteps': self.n_timesteps,
                 'sample_size': self.data_info.get('sample_size', None),
                 'data_info': self.data_info,
