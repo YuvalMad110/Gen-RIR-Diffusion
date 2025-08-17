@@ -2,6 +2,7 @@ import librosa
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import os
 from typing import List, Tuple
 
 # ------------------------------------------------------------------------
@@ -359,6 +360,354 @@ def scale_rir(rir: torch.Tensor, sr: float, db_cutoff: float = -40.0, apply_zero
     
     return scaled_rir
 
+# ------------------------------------------------------------------------
+#                       Signal Distance Metrics
+# ------------------------------------------------------------------------
+def cosine_distance_rir(generated_rir: List[np.ndarray], 
+                       real_rir: List[np.ndarray], force_same_length=False) -> Tuple[List[float], float]:
+    """
+    Calculate Cosine Distance (CD) between generated and real RIRs.
+    
+    Formula: CD(H, Ĥ) = (1/M) * Σ(1 - (h_i^T * ĥ_i) / (||h_i|| * ||ĥ_i||))
+    
+    Args:
+        generated_rir: List of generated RIR arrays, each shaped (1, rir_len)
+        real_rir: List of real RIR arrays, each shaped (1, rir_len)
+        force_same_length: If True, will truncate longer RIRs to match the shorter ones
+    
+    Returns:
+        Tuple containing:
+        - List of individual cosine distances for each RIR pair
+        - Total average cosine distance across all pairs
+    """
+    
+    if len(generated_rir) != len(real_rir):
+        raise ValueError("Generated and real RIR lists must have the same length")
+    
+    if len(generated_rir) == 0:
+        raise ValueError("RIR lists cannot be empty")
+    
+    individual_distances = []
+    
+    for i, (gen_rir, real_rir_i) in enumerate(zip(generated_rir, real_rir)):
+        # Ensure arrays are shaped correctly (flatten if needed)
+        if gen_rir.ndim == 2:
+            gen_rir = gen_rir.flatten()
+        if real_rir_i.ndim == 2:
+            real_rir_i = real_rir_i.flatten()
+
+        if len(gen_rir) != len(real_rir_i):
+            if force_same_length:
+                min_length = min(len(gen_rir), len(real_rir_i))
+                gen_rir = gen_rir[:min_length]
+                real_rir_i = real_rir_i[:min_length]
+            else:
+                raise ValueError(f"RIR pair {i} has mismatched lengths: {len(gen_rir)} vs {len(real_rir_i)}")
+            
+        if len(gen_rir) != len(real_rir_i):
+            raise ValueError(f"RIR pair {i} has mismatched lengths: "
+                           f"{len(gen_rir)} vs {len(real_rir_i)}")
+        
+        # Calculate dot product (h_i^T * ĥ_i)
+        dot_product = np.dot(real_rir_i, gen_rir)
+        
+        # Calculate L2 norms (||h_i|| and ||ĥ_i||)
+        norm_real = np.linalg.norm(real_rir_i)
+        norm_gen = np.linalg.norm(gen_rir)
+        
+        # Handle edge case where one or both norms are zero
+        if norm_real == 0 or norm_gen == 0:
+            if norm_real == 0 and norm_gen == 0:
+                cosine_similarity = 1.0  # Both zero vectors are "similar"
+            else:
+                cosine_similarity = 0.0  # One zero, one non-zero
+        else:
+            # Calculate cosine similarity
+            cosine_similarity = dot_product / (norm_real * norm_gen)
+            # Clamp to [-1, 1] to handle numerical precision issues
+            cosine_similarity = np.clip(cosine_similarity, -1.0, 1.0)
+        
+        # Calculate cosine distance (1 - cosine_similarity)
+        cosine_dist = 1.0 - cosine_similarity
+        individual_distances.append(cosine_dist)
+    
+    # Calculate total average distance
+    total_distance = np.mean(individual_distances)
+    
+    return individual_distances, total_distance
+
+def nmse_rir(generated_rir: List[np.ndarray], 
+             real_rir: List[np.ndarray], force_same_length=False) -> Tuple[List[float], float]:
+    """
+    Calculate Normalized Mean Square Error (NMSE) between generated and real RIRs.
+    
+    Formula: NMSE(H, Ĥ) = (1/M) * Σ(||ĥᵢ - hᵢ||² / ||hᵢ||²)
+    
+    Args:
+        generated_rir: List of generated RIR arrays, each shaped (1, rir_len)
+        real_rir: List of real RIR arrays, each shaped (1, rir_len)
+        force_same_length: If True, will truncate longer RIRs to match the shorter ones
+    
+    Returns:
+        Tuple containing:
+        - List of individual NMSE values for each RIR pair
+        - Total average NMSE across all pairs
+    """
+    
+    if len(generated_rir) != len(real_rir):
+        raise ValueError("Generated and real RIR lists must have the same length")
+    
+    if len(generated_rir) == 0:
+        raise ValueError("RIR lists cannot be empty")
+    
+    individual_nmse = []
+    
+    for i, (gen_rir, real_rir_i) in enumerate(zip(generated_rir, real_rir)):
+
+            
+        # Ensure arrays are shaped correctly (flatten if needed)
+        if gen_rir.ndim == 2:
+            gen_rir = gen_rir.flatten()
+        if real_rir_i.ndim == 2:
+            real_rir_i = real_rir_i.flatten()
+
+        if len(gen_rir) != len(real_rir_i):
+            if force_same_length:
+                min_length = min(len(gen_rir), len(real_rir_i))
+                gen_rir = gen_rir[:min_length]
+                real_rir_i = real_rir_i[:min_length]
+            else:
+                raise ValueError(f"RIR pair {i} has mismatched lengths: {len(gen_rir)} vs {len(real_rir_i)}")
+            
+               
+        # Calculate difference (ĥᵢ - hᵢ)
+        difference = gen_rir - real_rir_i
+        
+        # Calculate squared L2 norm of difference ||ĥᵢ - hᵢ||²
+        numerator = np.sum(difference ** 2)
+        
+        # Calculate squared L2 norm of real RIR ||hᵢ||²
+        denominator = np.sum(real_rir_i ** 2)
+        
+        # Handle edge case where real RIR has zero energy
+        if denominator == 0:
+            if numerator == 0:
+                # Both are zero, perfect match
+                nmse_value = 0.0
+            else:
+                # Real is zero but generated is not, infinite error
+                # We'll use a large value instead of infinity
+                nmse_value = float('inf')
+                print(f"Warning: Real RIR {i} has zero energy, NMSE is infinite")
+        else:
+            # Calculate NMSE for this pair
+            nmse_value = numerator / denominator
+        
+        individual_nmse.append(nmse_value)
+    
+    # Calculate total average NMSE (excluding infinite values)
+    finite_nmse = [x for x in individual_nmse if np.isfinite(x)]
+    if len(finite_nmse) == 0:
+        total_nmse = float('inf')
+    else:
+        total_nmse = np.mean(finite_nmse)
+    
+    return individual_nmse, total_nmse
+
+def evaluate_rir_quality(generated_rir: List[np.ndarray], 
+                        real_rir: List[np.ndarray], force_same_length=False) -> dict:
+    """
+    Calling for multiple RIR quality metrics and returns a dictionary with the results
+
+    """
+    # Calculate NMSE
+    individual_nmse, total_nmse = nmse_rir(generated_rir, real_rir, force_same_length)
+    # Calculate Cosine Distance
+    individual_cd, total_cd = cosine_distance_rir(generated_rir, real_rir, force_same_length)
+    metrics = {
+        'nmse': {
+            'individual': individual_nmse,
+            'total': total_nmse
+        },
+        'cosine_distance': {
+            'individual': individual_cd,
+            'total': total_cd
+        }
+    }
+    return metrics
+
+def sisdr_metric(signals_A: List[np.ndarray], signals_B: List[np.ndarray], force_same_length=False) -> Tuple[List[float], float]:
+    """
+    Calculate Scale-Invariant Signal-to-Distortion Ratio (SI-SDR) between signals_A to signals_B.
+    
+    SI-SDR is defined as:
+    SI-SDR = 10 * log10(||s_target||² / ||e_noise||²)
+    
+    where:
+    - s_target = <ĥ, h> / ||h||² * h  (target signal component)
+    - e_noise = ĥ - s_target  (noise/distortion component)
+    - ĥ is signals_A, h is signals_B
+    
+    Args:
+        signals_A: List of arrays, each shaped (1, sig_len)
+        signals_B: List of arrays, each shaped (1, sig_len)
+        force_same_length: If True, will truncate longer RIRs to match the shorter ones
+    
+    Returns:
+        Tuple containing:
+        - List of individual SI-SDR values for each signal pair (in dB)
+        - Total average SI-SDR across all pairs (in dB)
+    """
+    
+    if len(signals_A) != len(signals_B):
+        raise ValueError("Generated and real RIR lists must have the same length")
+    
+    individual_sisdr = []
+    
+    for i, (sig_a, sig_b) in enumerate(zip(signals_A, signals_B)):
+        # Ensure arrays are shaped correctly (flatten if needed)
+        if sig_a.ndim == 2:
+            sig_a = sig_a.flatten()
+        if sig_b.ndim == 2:
+            sig_b = sig_b.flatten()
+        # check signlas lengths
+        if len(sig_a) != len(sig_b):
+            if force_same_length:
+                min_length = min(len(sig_a), len(sig_b))
+                sig_a = sig_a[:min_length]
+                sig_b = sig_b[:min_length]
+            else:
+                raise ValueError(f"Signals pair {i} has mismatched lengths: {len(sig_a)} vs {len(sig_b)}")
+        
+        # Calculate the scaling factor: <ĥ, h> / ||h||²
+        dot_product = np.dot(sig_a, sig_b)
+        real_energy = np.sum(sig_b ** 2)
+        
+        # Handle edge case where real RIR has zero energy
+        if real_energy == 0:
+            if np.sum(sig_a ** 2) == 0:
+                # Both are zero, perfect match
+                sisdr_value = float('inf')
+            else:
+                # Real is zero but generated is not, worst case
+                sisdr_value = float('-inf')
+                print(f"Warning: Real RIR {i} has zero energy, SI-SDR is -inf")
+        else:
+            # Calculate scaling factor
+            alpha = dot_product / real_energy
+            
+            # Calculate target signal: s_target = α * h
+            s_target = alpha * sig_b
+            
+            # Calculate noise/distortion: e_noise = ĥ - s_target
+            e_noise = sig_a - s_target
+            
+            # Calculate energies
+            s_target_energy = np.sum(s_target ** 2)
+            e_noise_energy = np.sum(e_noise ** 2)
+            
+            # Calculate SI-SDR in dB
+            if e_noise_energy == 0:
+                # Perfect reconstruction
+                sisdr_value = float('inf')
+            else:
+                sisdr_value = 10 * np.log10(s_target_energy / e_noise_energy)
+        
+        individual_sisdr.append(sisdr_value)
+    
+    # Calculate total average SI-SDR (excluding infinite values)
+    finite_sisdr = [x for x in individual_sisdr if np.isfinite(x)]
+    if len(finite_sisdr) == 0:
+        if all(x == float('inf') for x in individual_sisdr):
+            total_sisdr = float('inf')
+        else:
+            total_sisdr = float('-inf')
+    else:
+        total_sisdr = np.mean(finite_sisdr)
+    
+    return individual_sisdr, total_sisdr
+
+
+def save_metrics_txt(metrics, rir_indices, file_path, conditions=None):
+    """Save metrics as a human-readable text summary."""
+
+    file_path = os.path.join(file_path, 'metrics_sum.txt') if not file_path.endswith('.txt') else file_path
+    with open(file_path, 'w') as f:
+        f.write("RIR EVALUATION METRICS SUMMARY\n")
+        f.write("=" * 50 + "\n\n")
+        
+        # Overall statistics
+        f.write("OVERALL STATISTICS:\n")
+        f.write("-" * 20 + "\n")
+        for metric_name, metric_values in metrics.items():
+            total_val = metric_values['total']
+            if np.isfinite(total_val):
+                if metric_name.lower() == 'sisdr':
+                    f.write(f"{metric_name.upper()}: {total_val:.2f} dB\n")
+                else:
+                    f.write(f"{metric_name.upper()}: {total_val:.6f}\n")
+            else:
+                f.write(f"{metric_name.upper()}: {total_val}\n")
+        
+        f.write(f"\nNumber of RIR pairs evaluated: {len(rir_indices)}\n\n")
+        
+        # Individual results
+        f.write("INDIVIDUAL RESULTS:\n")
+        f.write("-" * 20 + "\n")
+        f.write(f"{'RIR':<6}")
+        
+        # Add condition headers if available
+        if conditions is not None:
+            f.write(f"{'Room (W×L×H)':<15}")
+            if conditions.shape[1] > 3:
+                f.write(f"{'RT60':<8}")
+        
+        # Add metric headers
+        for metric_name in metrics.keys():
+            if metric_name.lower() == 'sisdr':
+                f.write(f"{metric_name.upper():<10}")
+            else:
+                f.write(f"{metric_name.upper():<12}")
+        f.write("\n")
+        
+        # Data rows
+        for i in range(len(rir_indices)):
+            f.write(f"{rir_indices[i]:<6}")
+            
+            # Add condition data if available
+            if conditions is not None:
+                room_str = f"{conditions[i,0]:.1f}×{conditions[i,1]:.1f}×{conditions[i,2]:.1f}"
+                f.write(f"{room_str:<15}")
+                if conditions.shape[1] > 3:
+                    f.write(f"{conditions[i,-1]:.2f}s{'':<3}")
+            
+            # Add metric values directly from metrics dictionary
+            for metric_name in metrics.keys():
+                val = metrics[metric_name]['individual'][i]
+                if np.isfinite(val):
+                    if metric_name.lower() == 'sisdr':
+                        f.write(f"{val:8.2f}dB")
+                    else:
+                        f.write(f"{val:10.6f}  ")
+                else:
+                    if metric_name.lower() == 'sisdr':
+                        f.write(f"{str(val):>9s} ")
+                    else:
+                        f.write(f"{str(val):>11s} ")
+            f.write("\n")
+        
+        # Interpretation guide
+        f.write(f"\n\nINTERPRETATION GUIDE:\n")
+        f.write("-" * 20 + "\n")
+        f.write("NMSE (Normalized Mean Square Error):\n")
+        f.write("  - Lower values = better similarity\n")
+        f.write("  - 0 = perfect match\n\n")
+        f.write("Cosine Distance:\n")
+        f.write("  - Lower values = better similarity\n") 
+        f.write("  - 0 = identical direction\n\n")
+        f.write("SI-SDR (Scale-Invariant Signal-to-Distortion Ratio):\n")
+        f.write("  - Higher values = better quality\n")
+        f.write("  - >20dB = excellent, 10-20dB = good, 0-10dB = fair, <0dB = poor\n")
 # ------------------------------------------------------------------------
 #                       Miscellaneous
 # ------------------------------------------------------------------------

@@ -30,8 +30,7 @@ from diffusers import DDPMScheduler
 from RIRDiffusionModel import RIRDiffusionModel
 from data.rir_dataset import load_rir_dataset
 from utils.signal_edc import create_edc_plots_mode2
-from utils.signal_proc import calculate_edc, estimate_decay_k_factor, undo_rir_scaling, apply_rir_scaling, normalize_signals
-import glob
+from utils.signal_proc import calculate_edc, estimate_decay_k_factor, undo_rir_scaling, apply_rir_scaling, normalize_signals, evaluate_rir_quality, sisdr_metric, save_metrics_txt
 import random
 from scipy.signal import convolve
 
@@ -304,21 +303,6 @@ def generate_rirs_batch(model: RIRDiffusionModel, conditions: torch.Tensor, devi
     scheduler = DDPMScheduler(num_train_timesteps=n_timesteps)
     scheduler.set_timesteps(n_timesteps)  # Use all training timesteps for best quality
     
-    print(f"Using conditions shape: {conditions.shape}")
-    
-    # Prepare conditioning for model
-    with torch.no_grad():
-        if model.use_cond_encoder:
-            encoded_conditions = model.condition_encoder(conditions)
-        else:
-            encoded_conditions = conditions
-        
-        # Add sequence dimension if needed
-        if encoded_conditions.dim() == 2:
-            encoded_conditions = encoded_conditions.unsqueeze(1)
-    
-    print(f"Encoded conditions shape: {encoded_conditions.shape}")
-    
     # Initialize with pure noise
     batch_size = nRIR
     channels = 2  # Real and imaginary parts
@@ -335,7 +319,7 @@ def generate_rirs_batch(model: RIRDiffusionModel, conditions: torch.Tensor, devi
             
             # Model forward pass
             try:
-                model_output = model(samples, timestep, encoded_conditions)
+                model_output = model(samples, timestep, conditions.unsqueeze(1))
                 
                 # Extract noise prediction
                 if isinstance(model_output, dict):
@@ -755,6 +739,9 @@ def process_speech_convolution(speech_path: str, speech_id: Optional[List[str]],
     gen_dir.mkdir(exist_ok=True)
     if real_rirs is not None:
         real_dir.mkdir(exist_ok=True)
+
+    gen_reverb_list = []
+    real_reverb_list = []
     
     # Process each speech file
     for speech_idx, speech_file in enumerate(tqdm(speech_files, desc="Processing speech files")):
@@ -773,9 +760,10 @@ def process_speech_convolution(speech_path: str, speech_id: Optional[List[str]],
         # Convolve with each generated RIR
         for rir_idx, gen_rir in enumerate(generated_rirs):
             try:
-                reverb_speech = convolve_speech_with_rir(speech, gen_rir)
+                reverb_speech_gen = convolve_speech_with_rir(speech, gen_rir)
                 output_path = gen_dir / f"gen_rir_{rir_idx:02d}_speech_{speech_idx:02d}_{file_name}.wav"
-                sf.write(output_path, reverb_speech, sr)
+                sf.write(output_path, reverb_speech_gen, sr)
+                gen_reverb_list.append(reverb_speech_gen)
             except Exception as e:
                 print(f"Error convolving speech {speech_idx} with generated RIR {rir_idx}: {e}")
         
@@ -783,9 +771,10 @@ def process_speech_convolution(speech_path: str, speech_id: Optional[List[str]],
         if real_rirs is not None:
             for rir_idx, real_rir in enumerate(real_rirs):
                 try:
-                    reverb_speech = convolve_speech_with_rir(speech, real_rir)
+                    reverb_speech_real = convolve_speech_with_rir(speech, real_rir)
                     output_path = real_dir / f"real_rir_{rir_idx:02d}_speech_{speech_idx:02d}_{file_name}.wav"
-                    sf.write(output_path, reverb_speech, sr)
+                    sf.write(output_path, reverb_speech_real, sr)
+                    real_reverb_list.append(reverb_speech_real)
                 except Exception as e:
                     print(f"Error convolving speech {speech_idx} with real RIR {rir_idx}: {e}")
     
@@ -795,6 +784,9 @@ def process_speech_convolution(speech_path: str, speech_id: Optional[List[str]],
     if real_rirs is not None:
         print(f"Real RIR convolutions: {real_dir}")
 
+    return gen_reverb_list, real_reverb_list
+
+# --------------------------- Main ---------------------------
 def main():
     parser = argparse.ArgumentParser(description="Generate RIRs using trained diffusion model")
     # --- Cfg ---
@@ -803,7 +795,7 @@ def main():
     parser.add_argument('--nSamples', type=int, default=128, 
                         help="Only take effect for old runs where data_info['nSamples'] is not available. Number of samples to load from dataset.")
     parser.add_argument("--model_path", type=str,
-                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Aug06_23-54-27_dgx03/model_best.pth.tar',
+                    default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Aug12_12-09-09_dgx03/model_best.pth.tar',
                     help="Path to the trained model checkpoint (.pth.tar)")
     parser.add_argument("--save_path", type=str, default=None,
                     help="Directory to save generated plots and audio")
@@ -818,9 +810,9 @@ def main():
     parser.add_argument("--dataset_path", type=str, default=os.path.normpath('./datasets/GTU_rir/GTU_RIR.pickle.dat'),
                     help="Path to dataset (required for mode 2)")
     # Speech convolution arguments
-    parser.add_argument("--speech_path", type=str, default='/dsi/gannot-lab1/datasets/LibriSpeech/LibriSpeech/Train/1195/130164/', # /dsi/gannot-lab1/datasets/LibriSpeech/LibriSpeech/Train/1195/130164/
+    parser.add_argument("--speech_path", type=str, default='/dsi/gannot-lab1/datasets/LibriSpeech/LibriSpeech/Train/1195/130164/',
                     help="Path to LibriSpeech dataset for speech convolution")
-    parser.add_argument("--speech_id", type=str, nargs='+', default=['1195-130164-0010','1195-130164-0010'],
+    parser.add_argument("--speech_id", type=str, nargs='+', default=['1195-130164-0010','1195-130164-0013'],
                     help="Optional speaker ID to filter LibriSpeech files")
     parser.add_argument("--n_speech_files", type=int, default=2,
                     help="Number of speech files to process for convolution")
@@ -925,7 +917,7 @@ def main():
     
     # -------------- Generate RIRs --------------
     generated_specs, generated_rirs = generate_rirs_batch(model, conditions, device, config)
-    
+    metrics = evaluate_rir_quality(generated_rirs, real_rirs_wave, force_same_length=True)
     print(f"Generated {len(generated_rirs)} RIR waveforms")
     
     # -------------- Create appropriate visualization --------------
@@ -947,7 +939,7 @@ def main():
                         conditions_np, rir_indices, sample_rate, full_save_path, f"**Scaled Signal**\n{title}")
             full_save_path = os.path.join(args.save_path, 'edc_comparison_mode2_scaled.png')
             create_edc_plots_mode2(real_rirs_wave_scaled, generated_rirs, conditions_np, rir_indices, 
-                        sample_rate, full_save_path, args.octaves, f"**Scaled Signal**\n{title}")
+                        sample_rate, full_save_path, metrics, args.octaves, f"**Scaled Signal**\n{title}")
         else:
             gen_rirs_wave_unscaled = generated_rirs
             gen_rirs_spec_unscaled = generated_rirs_spec_list
@@ -958,16 +950,22 @@ def main():
                 # Normalize RIRs before reverbed speech generation
                 real_rirs_wave_norm = normalize_signals(real_rirs_wave)
                 gen_rirs_wave_unscaled_norm = normalize_signals(gen_rirs_wave_unscaled)
-                process_speech_convolution(args.speech_path, args.speech_id, gen_rirs_wave_unscaled_norm, real_rirs_wave_norm,
+                reverb_speech_gen, reverb_speech_real = process_speech_convolution(args.speech_path, args.speech_id, gen_rirs_wave_unscaled_norm, real_rirs_wave_norm,
                                             args.save_path, sample_rate, args.n_speech_files)
             else:
-                process_speech_convolution(args.speech_path, args.speech_id, gen_rirs_wave_unscaled, real_rirs_wave,
+                reverb_speech_gen, reverb_speech_real = process_speech_convolution(args.speech_path, args.speech_id, gen_rirs_wave_unscaled, real_rirs_wave,
                                         args.save_path, sample_rate, args.n_speech_files)
+            metrics['sisdr'] = {}
+            metrics['sisdr']['individual'], metrics['sisdr']['total'] = sisdr_metric(reverb_speech_gen, reverb_speech_real, force_same_length=True) 
+
+        # save metrics results
+        save_metrics_txt(metrics, rir_indices, args.save_path, conditions_np)
+
         # plot unscaled signals
         create_base_plot_mode2(real_rirs_wave, gen_rirs_wave_unscaled, real_rirs_spec, gen_rirs_spec_unscaled,
                         conditions_np, rir_indices, sample_rate, args.save_path, title)
         create_edc_plots_mode2(real_rirs_wave, gen_rirs_wave_unscaled, conditions_np, rir_indices, 
-                      sample_rate, args.save_path, args.octaves, title)
+                      sample_rate, args.save_path, metrics, args.octaves, title)
 
     
     # Save audio files if requested

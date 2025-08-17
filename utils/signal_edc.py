@@ -62,9 +62,82 @@ def gen_edc(rir: np.ndarray, sr: int, octave_center: float) -> tuple:
     
     return time_axis, edc_db
 
+
+def format_condition_strings_with_metrics(conditions: np.ndarray, metrics: dict, mode: str = "room") -> list:
+    """
+    Format condition parameters with evaluation metrics for display.
+    
+    Args:
+        conditions: Array of condition parameters for all RIRs
+        metrics: Dictionary containing evaluation metrics (from evaluate_rir_quality)
+        mode: Display mode ("room" or "locations")
+        
+    Returns:
+        List of formatted strings, one for each RIR
+    """
+    formatted_strings = []
+    
+    for i in range(len(conditions)):
+        condition = conditions[i]
+        
+        # Base condition string
+        if mode == "room":
+            room_dims = condition[:3]
+            rt60 = condition[-1]
+            base_str = f"Room: {room_dims[0]:.1f}×{room_dims[1]:.1f}×{room_dims[2]:.1f}m, RT60: {rt60:.2f}s"
+        elif mode == "locations":
+            mic_loc = condition[3:6]
+            speaker_loc = condition[6:9]
+            base_str = f"Mic: ({mic_loc[0]:.1f},{mic_loc[1]:.1f},{mic_loc[2]:.1f}), Src: ({speaker_loc[0]:.1f},{speaker_loc[1]:.1f},{speaker_loc[2]:.1f})"
+        else:
+            base_str = f"Condition {i+1}"
+        
+        # Add metrics
+        metrics_parts = []
+        for metric_name, metric_data in metrics.items():
+            if 'individual' in metric_data and i < len(metric_data['individual']):
+                individual_value = metric_data['individual'][i]
+                formatted_value = f"{individual_value:.4f}" if not np.isinf(individual_value) else "inf"
+                metric_abbrev = metric_name.upper() if len(metric_name) <= 4 else metric_name[:4].upper()
+                metrics_parts.append(f"{metric_abbrev}: {formatted_value}")
+                # # Format the metric value based on its type and range
+                # if metric_name.lower() == 'nmse':
+                #     if np.isinf(individual_value):
+                #         formatted_value = "inf"
+                #     else:
+                #         formatted_value = f"{individual_value:.4f}"
+                #     metrics_parts.append(f"NMSE: {formatted_value}")
+                # elif metric_name.lower() == 'cosine_distance':
+                #     formatted_value = f"{individual_value:.4f}"
+                #     metrics_parts.append(f"CD: {formatted_value}")
+                # else:
+                #     # Generic formatting for other metrics
+                #     if np.isinf(individual_value):
+                #         formatted_value = "inf"
+                #     elif abs(individual_value) < 0.01:
+                #         formatted_value = f"{individual_value:.6f}"
+                #     else:
+                #         formatted_value = f"{individual_value:.4f}"
+                #     # Use abbreviated metric name if it's long
+                #     metric_abbrev = metric_name.upper() if len(metric_name) <= 4 else metric_name[:4].upper()
+                #     metrics_parts.append(f"{metric_abbrev}: {formatted_value}")
+        
+        # Combine base string with metrics
+        if metrics_parts:
+            metrics_str = ", ".join(metrics_parts)
+            full_str = f"{base_str}, {metrics_str}"
+        else:
+            full_str = base_str
+        
+        formatted_strings.append(full_str)
+    
+    return formatted_strings
+
+
 def create_edc_plots_mode2(real_rirs_wave: list, generated_rirs_wave: list, 
                           conditions: np.ndarray, rir_indices: list, sr: int, 
-                          save_path: str, octaves: list = None, title: str = "EDC Comparison - Mode 2") -> None:
+                          save_path: str, metrics: dict = None, octaves: list = None, 
+                          title: str = "EDC Comparison - Mode 2") -> None:
     """
     Create EDC (Energy Decay Curve) plots per octave for Mode 2 comparison.
     
@@ -75,13 +148,22 @@ def create_edc_plots_mode2(real_rirs_wave: list, generated_rirs_wave: list,
         rir_indices: Dataset indices used
         sr: Sample rate
         save_path: Directory to save plot
+        metrics: Dictionary containing evaluation metrics (from evaluate_rir_quality)
         octaves: List of octave center frequencies in Hz (default: [125, 250, 500, 1000, 2000, 4000])
+        title: Title for the plot
     """
     if octaves is None:
         octaves = [125, 250, 500, 1000, 2000, 4000]
     
     n_rirs = len(real_rirs_wave)
     n_octaves = len(octaves)
+    
+    # Generate formatted condition strings with metrics
+    if metrics is not None:
+        condition_strings = format_condition_strings_with_metrics(conditions, metrics, "room")
+    else:
+        # Fallback to original formatting if no metrics provided
+        condition_strings = [format_condition_string(conditions[i], "room") for i in range(n_rirs)]
     
     # Create subplots: one row per RIR pair, one column per octave
     subplot_ratio = [3.5, 2.3]
@@ -103,8 +185,8 @@ def create_edc_plots_mode2(real_rirs_wave: list, generated_rirs_wave: list,
         gen_rir = generated_rirs_wave[i]
         idx = rir_indices[i]
         
-        # Format condition info for the row
-        condition_str = format_condition_string(conditions[i], "room")
+        # Use the pre-formatted condition string with metrics
+        condition_str = condition_strings[i]
         
         for j, octave_freq in enumerate(octaves):
             ax = axes[i, j] if n_octaves > 1 else axes[i]
@@ -129,7 +211,7 @@ def create_edc_plots_mode2(real_rirs_wave: list, generated_rirs_wave: list,
                 ax.grid(True, alpha=0.3)
                 # ax.legend()
 
-                #YM
+                # Dynamic y-axis limits
                 y_min = min(edc_real.min(), edc_gen.min()) - 5
                 y_max = max(edc_real.max(), edc_gen.max()) + 5
                 y_min = max(y_min, -80)  # Don't go below -80 dB
@@ -173,7 +255,7 @@ def create_edc_plots_mode2(real_rirs_wave: list, generated_rirs_wave: list,
 
 
 def format_condition_string(condition: np.ndarray, mode: str = "room") -> str:
-    """Format condition parameters for display."""
+    """Format condition parameters for display (legacy function for backward compatibility)."""
     if mode == "room":
         room_dims = condition[:3]
         rt60 = condition[-1]
