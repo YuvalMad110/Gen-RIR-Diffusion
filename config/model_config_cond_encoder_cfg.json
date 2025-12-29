@@ -1,0 +1,15 @@
+{
+  "block_out_channels": [32, 64, 128],
+  "layers_per_block": 2,
+  "use_cross_attention": null,
+  "attention_head_dim": 2,
+  "norm_num_groups": null,
+  "use_mid_block": true,
+  "use_cond_encoder": true,
+  "encoder_hidden_dims": [64,128],
+  "input_cond_dim": 10,
+  "in_channels": 2,
+  "out_channels": 2,
+  "guidance_enabled": true,
+  "guidance_dropout_prob": 0.1
+}
