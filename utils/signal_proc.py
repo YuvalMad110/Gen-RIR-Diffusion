@@ -481,7 +481,7 @@ def nmse_rir(generated_rir: List[np.ndarray],
             
                
         # Calculate difference (ĥᵢ - hᵢ)
-        difference = gen_rir - real_rir_i
+        difference = (gen_rir - real_rir_i).numpy()
         
         # Calculate squared L2 norm of difference ||ĥᵢ - hᵢ||²
         numerator = np.sum(difference ** 2)
