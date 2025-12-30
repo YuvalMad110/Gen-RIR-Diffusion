@@ -16,51 +16,35 @@ from pathlib import Path
 
 from utils.signal_proc import  waveform_to_spectrogram, spectrogram_to_waveform, calculate_edc, estimate_decay_k_factor
 
-def load_model_and_config(model_path: str, device: torch.device, 
-                          model_class) -> Tuple[Any, Dict]:
-    """Load trained diffusion model and its configuration."""
+def load_model_and_data_info(model_path: str, device: torch.device, model_class) -> Tuple[Any, Dict]:
+    """Load trained diffusion model and data_info from checkpoint."""
     print(f"Loading model from: {model_path}")
-    
+
     checkpoint = torch.load(model_path, map_location=device)
-    
-    # Extract configuration - these must exist in checkpoint
-    config = {
-        'sample_size': checkpoint['sample_size'],
-        'n_timesteps': checkpoint['n_timesteps'],
-        'use_cond_encoder': checkpoint.get('use_cond_encoder', False),
-        'data_info': checkpoint['data_info'],
-        'losses_per_epoch': checkpoint.get('losses_per_epoch', {}),
-    }
-    
-    # Check for separate config file (newer models)
-    config_path = os.path.join(os.path.dirname(model_path), "model_config.json")
-    
-    if os.path.isfile(config_path):
-        with open(config_path, "r") as f:
-            model_config = json.load(f)
-        
-        # Remove derived fields that shouldn't be passed to constructor
-        for key in ("n_timesteps", "cross_attention_dim", "down_block_types", 
-                    "up_block_types", "mid_block_type"):
-            model_config.pop(key, None)
-        
-        model = model_class(device=device, n_timesteps=config['n_timesteps'], **model_config)
-    else:
-        # Legacy model loading
-        model = model_class(
-            device=device, sample_size=config['sample_size'],
-            n_timesteps=config['n_timesteps'], use_cond_encoder=config['use_cond_encoder']
-        )
-    
+
+    # Get model config and data info directly from checkpoint
+    model_config = checkpoint['model_config']
+    data_info = checkpoint['data_info']
+
+    # Extract n_timesteps from model_config
+    n_timesteps = model_config['n_timesteps']
+
+    # Create model from config, excluding derived fields
+    model_params = {k: v for k, v in model_config.items()
+                    if k not in ("n_timesteps", "cross_attention_dim", "down_block_types",
+                                "up_block_types", "mid_block_type")}
+
+    model = model_class(device=device, n_timesteps=n_timesteps, **model_params)
+
     model.load_state_dict(checkpoint['state_dict'])
     model.eval()
-    
+
     print(f"Model loaded on {device}")
-    print(f"  Sample size: {config['sample_size']}, Timesteps: {config['n_timesteps']}")
+    print(f"  Sample size: {model_config['sample_size']}, Timesteps: {n_timesteps}")
     if hasattr(model, 'guidance_enabled'):
         print(f"  Guidance: enabled={model.guidance_enabled}, dropout={model.guidance_dropout_prob}")
-    
-    return model, config
+
+    return model, data_info
 
 
 def load_dataset_conditions(dataset, n_samples: int, data_info: Dict,
@@ -128,28 +112,3 @@ def _to_numpy(x) -> np.ndarray:
     return np.asarray(x)
 
 
-def get_data_params(config: Dict, args) -> Dict:
-    """Extract data parameters from config, with args overrides where provided."""
-    data_info = config['data_info']
-    
-    def get_param(arg_name, data_key):
-        """Get from args if provided, otherwise from data_info (must exist)."""
-        arg_val = getattr(args, arg_name, None)
-        if arg_val is not None:
-            return arg_val
-        return data_info[data_key]
-    
-    return {
-        'sr_target': get_param('sr_target', 'sr_target'),
-        'n_fft': get_param('n_fft', 'n_fft'),
-        'hop_length': get_param('hop_length', 'hop_length'),
-        'sample_max_sec': get_param('sample_max_sec', 'sample_max_sec'),
-        'use_spectrogram': get_param('use_spectrogram', 'use_spectrogram'),
-        'n_samples': data_info['nSamples'],
-        'scale_rir': data_info.get('scale_rir', False),
-        'train_ratio': data_info['train_ratio'],
-        'eval_ratio': data_info['eval_ratio'],
-        'test_ratio': data_info['test_ratio'],
-        'random_seed': data_info['random_seed'],
-        'split_by_room': data_info['split_by_room'],
-    }

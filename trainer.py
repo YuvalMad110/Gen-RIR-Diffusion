@@ -21,10 +21,9 @@ from diffusers import DDPMScheduler
 
 class DiffusionTrainer():
     def __init__(self,
-                 device, 
-                 lr=1e-4, 
-                 epochs=20, 
-                 n_timesteps=1000, 
+                 device,
+                 lr=1e-4,
+                 epochs=20,
                  checkpoint_freq=10,
                  eval_freq=5,
                  data_info=None,
@@ -42,7 +41,6 @@ class DiffusionTrainer():
         self.device = device
         self.epochs = epochs
         self.lr = lr
-        self.n_timesteps = n_timesteps
         self.use_amp = torch.cuda.is_available() and self.device.type == 'cuda'
         self.checkpoint_freq = checkpoint_freq
         self.eval_freq = eval_freq
@@ -83,7 +81,7 @@ class DiffusionTrainer():
                         f"          [Accelerator] is_distributed: {self.accelerator.distributed_type != 'NO'} | nProcesses: {self.accelerator.num_processes} | Device: {self.accelerator.device}\n"
                         f"          [Dataloader] Train size: {len(train_dataloader.dataset)} | len(train_loader): {len(train_dataloader)} | Val size: {len(eval_dataloader.dataset)}\n"
                         f"          [RunParams] Epochs: {self.epochs} | Batch size: {math.ceil(len(train_dataloader.dataset) / len(train_dataloader))} | Eval freq: {self.eval_freq}\n"
-                        f"          [Model] LR: {self.lr} | Sample-Size: {self.data_info["sample_size"]} | n_timesteps: {self.n_timesteps}\n" #  | nParams: {self.model.count_parameters()}
+                        f"          [Model] LR: {self.lr} | Sample-Size: {self.data_info["sample_size"]} | n_timesteps: {self.model.n_timesteps}\n" #  | nParams: {self.model.count_parameters()}
                         f"          [Data] {self.data_info}\n\n")
             
         # ============= Start Epoch loop =============
@@ -254,7 +252,6 @@ class DiffusionTrainer():
                 'use_cond_encoder': model_unwrapped.use_cond_encoder,
                 'model_nParams': model_unwrapped.count_parameters(),
                 'model_config': model_unwrapped.config,
-                'n_timesteps': self.n_timesteps,
                 'sample_size': self.data_info.get('sample_size', None),
                 'data_info': self.data_info,
                 'state_dict': model_unwrapped.state_dict(),

@@ -22,26 +22,22 @@ from data.rir_dataset import load_rir_dataset
 from utils.signal_proc import (evaluate_rir_quality, sisdr_metric, normalize_signals,
     undo_rir_scaling, apply_rir_scaling, spectrogram_to_waveform, waveform_to_spectrogram)
 from utils.signal_edc import create_edc_plots_mode2
-from utils.inference_data_loading import load_model_and_config, load_dataset_conditions, get_data_params
+from utils.inference_data_loading import load_model_and_data_info, load_dataset_conditions
 from utils.visualization import plot_comparison, plot_edc_comparison
 from utils.audio_processing import process_speech_convolution, save_audio_files
 from utils.io_utils import save_inference_results, save_metrics, save_config_summary, create_output_directory
 
 
-def generate_rirs(model, conditions, device, sample_size, n_timesteps,
-                  hop_length, n_fft, guidance_scale=1.0, num_inference_steps=None):
+def generate_rirs(model, conditions, device, hop_length, n_fft,
+                  num_inference_steps, guidance_scale=1.0):
     """Generate RIRs and convert to waveforms."""
     batch_size = conditions.shape[0]
     channels = 2
-    shape = (batch_size, channels, *sample_size)
-    num_steps = num_inference_steps or n_timesteps
-    
-    print(f"Generating {batch_size} RIRs with {num_steps} steps, guidance_scale={guidance_scale}")
-    
-    generated_specs = model.generate(
-        cond=conditions, shape=shape,
-        num_steps=num_steps, guidance_scale=guidance_scale
-    )
+    shape = (batch_size, channels, *model.sample_size)
+
+    print(f"Generating {batch_size} RIRs with {num_inference_steps} steps, guidance_scale={guidance_scale}")
+
+    generated_specs = model.generate(cond=conditions, shape=shape, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale)
     
     if torch.is_tensor(generated_specs):
         generated_specs = generated_specs.numpy()
@@ -108,14 +104,6 @@ def parse_args():
     parser.add_argument("--speech_id", type=str, nargs='+', default=['1195-130164-0010','1195-130164-0013'], help="Optional speaker ID to filter LibriSpeech files")
     parser.add_argument("--n_speech_files", type=int, default=2, help="Number of speech files for convolution")
     parser.add_argument("--norm_rir",  type=bool, default=True, help="Normalize RIRs before speech convolution")
-    
-    # Data parameters (override model config)
-    parser.add_argument("--sr_target", type=int, default=None)
-    parser.add_argument("--n_fft", type=int, default=None)
-    parser.add_argument("--hop_length", type=int, default=None)
-    parser.add_argument("--sample_max_sec", type=float, default=None)
-    parser.add_argument("--use_spectrogram", type=bool, default=None)
-    parser.add_argument("--nSamples", type=int, default=128)
     parser.add_argument("--octaves", type=float, nargs='+', default=[125, 250, 500, 1000, 2000, 4000], help="Octave bands for EDC analysis")
     
     return parser.parse_args()
@@ -135,8 +123,9 @@ def main():
         print(f"Random seed: {args.seed}")
     
     # Load model
-    model, config = load_model_and_config(args.model_path, device, RIRDiffusionModel)
-    data_params = get_data_params(config, args)
+    model, data_info = load_model_and_data_info(args.model_path, device, RIRDiffusionModel)
+    args.num_inference_steps = args.num_inference_steps or model.n_timesteps
+
     # Check CFG compatibility
     if args.guidance_scale != 1.0:
         if not getattr(model, 'guidance_enabled', False):
@@ -148,101 +137,100 @@ def main():
         args.save_path = os.path.join(os.path.dirname(args.model_path), f"generated_rirs")
     save_path = Path(args.save_path)
     save_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Load dataset
     print("\nLoading dataset...")
     _, eval_dataset, _ = load_rir_dataset(
         name='gtu', path=args.dataset_path, split=True, mode='raw',
-        hop_length=data_params['hop_length'], n_fft=data_params['n_fft'],
-        use_spectrogram=data_params['use_spectrogram'],
-        sample_max_sec=data_params['sample_max_sec'],
-        nSamples=data_params['n_samples'], sr_target=data_params['sr_target'],
-        train_ratio=data_params['train_ratio'], eval_ratio=data_params['eval_ratio'],
-        test_ratio=data_params['test_ratio'], random_seed=data_params['random_seed'],
-        split_by_room=data_params['split_by_room']
+        hop_length=data_info['hop_length'], n_fft=data_info['n_fft'],
+        use_spectrogram=data_info['use_spectrogram'],
+        sample_max_sec=data_info['sample_max_sec'],
+        nSamples=data_info['nSamples'], sr_target=data_info['sr_target'],
+        train_ratio=data_info['train_ratio'], eval_ratio=data_info['eval_ratio'],
+        test_ratio=data_info['test_ratio'], random_seed=data_info['random_seed'],
+        split_by_room=data_info['split_by_room']
     )
     
     # Load conditions from dataset
     conditions, real_rirs_wave, real_rirs_spec, rir_indices, k_factors = load_dataset_conditions(
-        eval_dataset, args.nRIR, config['data_info'], args.rir_indices
+        eval_dataset, args.nRIR, data_info, args.rir_indices
     )
     conditions = conditions.to(device)
-    
+
     # Generate RIRs
     print(f"\nGenerating {len(rir_indices)} RIRs...")
     generated_specs, generated_rirs = generate_rirs(
-        model, conditions, device, config['sample_size'], config['n_timesteps'],
-        data_params['hop_length'], data_params['n_fft'],
-        args.guidance_scale, args.num_inference_steps
+        model, conditions, device, data_info['hop_length'], data_info['n_fft'],
+        args.num_inference_steps, args.guidance_scale
     )
     print(f"Generated {len(generated_rirs)} RIR waveforms")
-    
+
     # Evaluate quality
     metrics = evaluate_rir_quality(generated_rirs, real_rirs_wave, force_same_length=True)
-    
+
     # Handle scaling if used in training
-    if data_params['scale_rir'] and k_factors is not None:
+    if data_info.get('scale_rir', False) and k_factors is not None:
         gen_unscaled_wave, gen_unscaled_spec, real_scaled_wave, real_scaled_spec = \
             prepare_scaled_unscaled_data(
                 real_rirs_wave, generated_rirs, k_factors,
-                data_params['sr_target'], data_params['n_fft'], data_params['hop_length']
+                data_info['sr_target'], data_info['n_fft'], data_info['hop_length']
             )
-        
+
         if not args.no_plots:
-            title = f"Scaled | SR:{data_params['sr_target']}Hz, guidance:{args.guidance_scale}"
+            title = f"Scaled | SR:{data_info['sr_target']}Hz, guidance:{args.guidance_scale}"
             plot_comparison(
                 real_scaled_wave, generated_rirs, real_scaled_spec, generated_specs,
-                conditions.cpu().numpy(), rir_indices, data_params['sr_target'],
+                conditions.cpu().numpy(), rir_indices, data_info['sr_target'],
                 str(save_path / "comparison_scaled.png"), title, metrics
             )
     else:
         gen_unscaled_wave = generated_rirs
         gen_unscaled_spec = generated_specs
-    
+
     # Plots
     conditions_np = conditions.cpu().numpy()
-    title = f"SR:{data_params['sr_target']}Hz | Guidance:{args.guidance_scale}"
-    
+    title = f"SR:{data_info['sr_target']}Hz | Guidance:{args.guidance_scale}"
+
     if not args.no_plots:
         plot_comparison(
             real_rirs_wave, gen_unscaled_wave, real_rirs_spec, gen_unscaled_spec,
-            conditions_np, rir_indices, data_params['sr_target'],
+            conditions_np, rir_indices, data_info['sr_target'],
             str(save_path / "comparison.png"), title, metrics
         )
         create_edc_plots_mode2(
             real_rirs_wave, gen_unscaled_wave, conditions_np, rir_indices,
-            data_params['sr_target'], str(save_path / "edc_comparison.png"),
+            data_info['sr_target'], str(save_path / "edc_comparison.png"),
             metrics, args.octaves, title
         )
-    
+
     # Speech convolution
     if args.speech_path:
         rirs_for_conv = normalize_signals(gen_unscaled_wave) if args.norm_rir else gen_unscaled_wave
         real_for_conv = normalize_signals(real_rirs_wave) if args.norm_rir else real_rirs_wave
-        
+
         gen_reverb, real_reverb = process_speech_convolution(
             args.speech_path, rirs_for_conv, real_for_conv, str(save_path),
-            data_params['sr_target'], args.speech_id, args.n_speech_files,
+            data_info['sr_target'], args.speech_id, args.n_speech_files,
             normalize_rirs=False
         )
-        
+
         if gen_reverb and real_reverb:
             metrics['sisdr'] = {}
             metrics['sisdr']['individual'], metrics['sisdr']['total'] = sisdr_metric(
                 gen_reverb, real_reverb, force_same_length=True
             )
-    
+
     # Save outputs
     save_metrics(metrics, rir_indices, str(save_path), conditions_np, args.guidance_scale)
-    save_config_summary(config, data_params, args, str(save_path))
-    
+    save_config_summary(model.config, data_info, args, str(save_path))
+
     if args.save_audio:
-        save_audio_files(generated_rirs, str(save_path), data_params['sr_target'], "generated")
-        save_audio_files(real_rirs_wave, str(save_path), data_params['sr_target'], "real")
+        save_audio_files(generated_rirs, str(save_path), data_info['sr_target'], "generated")
+        save_audio_files(real_rirs_wave, str(save_path), data_info['sr_target'], "real")
     
     if args.save_results:
         save_inference_results(
-            generated_rirs, generated_specs, conditions_np, config,
+            generated_rirs, generated_specs, conditions_np, model.config,
             args.model_path, rir_indices, str(save_path), args.guidance_scale
         )
     
