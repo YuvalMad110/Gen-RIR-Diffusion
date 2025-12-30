@@ -11,7 +11,7 @@ from torch.amp import autocast, GradScaler
 from utils.misc import save_metric, get_timestamped_logdir
 
 from tqdm import tqdm
-from diffusers import DDPMScheduler
+from diffusers import DDPMScheduler, DDIMScheduler
 from diffusers.models.unets import UNet2DConditionModel
 from typing import List, Tuple, Optional, Union
 
@@ -300,19 +300,21 @@ class RIRDiffusionModel(torch.nn.Module):
         return prediction
     
     @torch.no_grad()
-    def generate(self, cond: torch.Tensor, shape: torch.Size, num_steps: int = 50, 
-                 guidance_scale: float = 1.0, verbose: bool = True):
+    def generate(self, cond: torch.Tensor, shape: torch.Size, num_inference_steps: int = None, 
+                 guidance_scale: float = 1.0, use_ddim: bool = False, verbose: bool = True):
         """
         Generate a synthetic RIR conditioned on input parameters with optional guidance.
-        
+
         Args:
             cond: Tensor of shape [input_cond_dim] or [B, input_cond_dim] containing conditioning
             shape: Shape of the output tensor
-            num_steps: Number of reverse diffusion steps
-            guidance_scale: Classifier-free guidance scale. 
+            num_inference_steps: Number of reverse diffusion steps (when smaller then (train) self.n_timesteps, DDIM is forced)
+            guidance_scale: Classifier-free guidance scale.
                        1.0 = no guidance (conditional only)
                        >1.0 = stronger conditioning effect
-            
+            use_ddim: Whether to use DDIM (faster) instead of DDPM sampling
+            verbose: Whether to show progress ba
+
         Returns:
             Generated RIR signal
         """
@@ -321,34 +323,41 @@ class RIRDiffusionModel(torch.nn.Module):
             cond = cond.unsqueeze(0)
         cond = cond.float().to(self.device)
         batch_size = cond.shape[0]
-        
-        # Encode conditioning (no dropout during inference)
+
+        # Encode conditioning
         cond_encoded = self.encode_conditioning(cond)
-        
         # Prepare null conditioning for guidance
         null_cond = self.get_null_conditioning(batch_size)
-        
         # Initialize with Gaussian noise
         noisy_rir = torch.randn(shape, device=self.device)
-        
-        # Set up inference timesteps
-        inference_scheduler = DDPMScheduler(num_train_timesteps=self.n_timesteps)
-        inference_scheduler.set_timesteps(num_steps)
-        
+
+        # Set num_steps and DDIM 
+        if num_inference_steps is None:
+            num_inference_steps = self.n_timesteps
+        elif num_inference_steps < self.n_timesteps:
+            use_ddim = True  # Force DDIM for fewer steps
+
+        # Set up inference scheduler
+        if use_ddim:
+            inference_scheduler = DDIMScheduler(num_train_timesteps=self.n_timesteps)
+        else:
+            inference_scheduler = DDPMScheduler(num_train_timesteps=self.n_timesteps)
+        inference_scheduler.set_timesteps(num_inference_steps)
+
         for t in tqdm(inference_scheduler.timesteps, desc="Generating", disable=not verbose):
             if guidance_scale != 1.0:
                 # Unconditional prediction
                 uncond_output = self.model(noisy_rir, t, null_cond)["sample"]
-                # Conditional prediction  
+                # Conditional prediction
                 cond_output = self.model(noisy_rir, t, cond_encoded)["sample"]
                 # Guidance combination: uncond + scale * (cond - uncond)
                 model_output = uncond_output + guidance_scale * (cond_output - uncond_output)
             else:
                 # Standard conditional generation (no guidance overhead)
                 model_output = self.model(noisy_rir, t, cond_encoded)["sample"]
-            
+
             noisy_rir = inference_scheduler.step(model_output, t, noisy_rir).prev_sample
-        
+
         return noisy_rir.cpu()
     
     def count_parameters(self):
