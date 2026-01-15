@@ -52,21 +52,77 @@ def generate_rirs(model, conditions, device, hop_length, n_fft,
     return specs_list, waveforms_list
 
 
-def prepare_scaled_unscaled_data(real_rirs_wave, generated_rirs_wave, k_factors, 
+def prepare_scaled_unscaled_data(real_rirs_wave, generated_rirs_wave, k_factors,
                                   sr, n_fft, hop_length):
     """Prepare scaled real RIRs and unscaled generated RIRs for comparison."""
     real_tensor = torch.stack([torch.tensor(r, dtype=torch.float32) for r in real_rirs_wave])
     gen_tensor = torch.stack([torch.tensor(r, dtype=torch.float32) for r in generated_rirs_wave])
-    
+
     real_scaled = apply_rir_scaling(real_tensor, k_factors, sr)
     real_scaled_wave = [r.cpu().numpy() for r in real_scaled]
     real_scaled_spec = [waveform_to_spectrogram(r, hop_length, n_fft) for r in real_scaled_wave]
-    
+
     gen_unscaled = undo_rir_scaling(gen_tensor, k_factors, sr)
     gen_unscaled_wave = [r.cpu().numpy() for r in gen_unscaled]
     gen_unscaled_spec = [waveform_to_spectrogram(r, hop_length, n_fft) for r in gen_unscaled_wave]
-    
+
     return gen_unscaled_wave, gen_unscaled_spec, real_scaled_wave, real_scaled_spec
+
+
+def load_selected_rirs(selected_rir_path, device, data_info):
+    """Load selected RIR samples from evaluation file.
+
+    Args:
+        selected_rir_path: Path to selected_samples_{metric}.pt file
+        device: Device to load conditions tensor to
+        data_info: Data info dict with hop_length, n_fft, sr_target, etc.
+
+    Returns:
+        conditions: Tensor of conditions [N, 10] on device
+        real_rirs_wave: List of reference RIR waveforms
+        real_rirs_spec: List of reference RIR spectrograms
+        quality_labels: List of quality labels ('best', 'worst', 'median', 'mean')
+        k_factors: Tensor of k-factors if scaling is enabled, else None
+    """
+    print(f"\nLoading selected RIRs from: {selected_rir_path}")
+
+    # Load the saved data
+    data = torch.load(selected_rir_path, weights_only=False)
+    metric_name = data['metric_name']
+    samples_dict = data['samples']
+
+    print(f"Loaded samples for metric: {metric_name}")
+
+    # Extract samples in order: best, worst, median, mean
+    quality_order = ['best', 'worst', 'median', 'mean']
+
+    conditions_list = []
+    real_rirs_wave = []
+    quality_labels = []
+
+    for quality in quality_order:
+        sample = samples_dict[quality]['sample']
+        conditions_list.append(torch.tensor(sample['condition'], dtype=torch.float32))
+        real_rirs_wave.append(sample['reference'])
+        quality_labels.append(quality)
+
+        print(f"  {quality}: idx={samples_dict[quality]['idx']}, value={samples_dict[quality]['value']:.4f}")
+
+    conditions = torch.stack(conditions_list).to(device)
+
+    # Compute spectrograms from waveforms
+    real_rirs_spec = [waveform_to_spectrogram(w, data_info['hop_length'], data_info['n_fft'])
+                      for w in real_rirs_wave]
+
+    # Compute k-factors if RIR scaling is enabled
+    k_factors = None
+    if data_info.get('scale_rir', False):
+        from utils.signal_proc import calculate_edc, estimate_decay_k_factor
+        real_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in real_rirs_wave])
+        edc = calculate_edc(real_tensor)
+        k_factors, _ = estimate_decay_k_factor(edc, data_info['sr_target'], data_info.get('db_cutoff', -40))
+
+    return conditions, real_rirs_wave, real_rirs_spec, quality_labels, k_factors
 
 
 def parse_args():
@@ -82,7 +138,7 @@ def parse_args():
     # Generation settings
     parser.add_argument("--nRIR", type=int, default=5, help="Number of RIRs to generate")
     parser.add_argument("--rir_indices", type=int, nargs='+', default=None, help="Specific dataset indices to use (overrides nRIR count)")
-    parser.add_argument("--guidance_scale", type=float, default=4, help="CFG scale (1.0=no guidance, >1.0=stronger conditioning)")
+    parser.add_argument("--guidance_scale", type=float, default=2, help="CFG scale (1.0=no guidance, >1.0=stronger conditioning)")
     parser.add_argument("--num_inference_steps", type=int, default=None, help="Denoising steps (None=use training timesteps)")
     
     # Paths
@@ -105,7 +161,11 @@ def parse_args():
     parser.add_argument("--n_speech_files", type=int, default=2, help="Number of speech files for convolution")
     parser.add_argument("--norm_rir",  type=bool, default=True, help="Normalize RIRs before speech convolution")
     parser.add_argument("--octaves", type=float, nargs='+', default=[125, 250, 500, 1000, 2000, 4000], help="Octave bands for EDC analysis")
-    
+
+    # Load selected RIRs from evaluation
+    parser.add_argument("--load_selected_rirs", action="store_true", help="Load RIRs from selected samples file")
+    parser.add_argument("--selected_rir_path", type=str, default=None, help="Path to selected RIR samples file (e.g., selected_samples_t60.pt)")
+
     return parser.parse_args()
 
 
@@ -132,30 +192,46 @@ def main():
             print("Warning: Model was not trained with CFG. Setting guidance_scale to 1.0")
             args.guidance_scale = 1.0
 
+    # Load conditions and RIRs
+    if args.load_selected_rirs:
+        # Load from selected RIR samples file
+        conditions, real_rirs_wave, real_rirs_spec, rir_indices, k_factors = load_selected_rirs(
+            args.selected_rir_path, device, data_info
+        )
+
+        # Set save path to same folder as selected_rir_path with subfolder "full_generation_{metric}"
+        if args.save_path is None:
+            # Extract metric name from filename (e.g., "selected_samples_t60.pt" -> "t60")
+            filename = os.path.basename(args.selected_rir_path)
+            metric_name = filename.replace('selected_samples_', '').replace('.pt', '')
+            args.save_path = os.path.join(os.path.dirname(args.selected_rir_path), f"full_generation_{metric_name}")
+    else:
+        # Load from dataset (original behavior)
+        print("\nLoading dataset...")
+        _, eval_dataset, _ = load_rir_dataset(
+            name='gtu', path=args.dataset_path, split=True, mode='raw',
+            hop_length=data_info['hop_length'], n_fft=data_info['n_fft'],
+            use_spectrogram=data_info['use_spectrogram'],
+            sample_max_sec=data_info['sample_max_sec'],
+            nSamples=data_info['nSamples'], sr_target=data_info['sr_target'],
+            train_ratio=data_info['train_ratio'], eval_ratio=data_info['eval_ratio'],
+            test_ratio=data_info['test_ratio'], random_seed=data_info['random_seed'],
+            split_by_room=data_info['split_by_room']
+        )
+
+        # Load conditions from dataset
+        conditions, real_rirs_wave, real_rirs_spec, rir_indices, k_factors = load_dataset_conditions(
+            eval_dataset, args.nRIR, data_info, args.rir_indices
+        )
+        conditions = conditions.to(device)
+
+        # Set save path to model directory
+        if args.save_path is None:
+            args.save_path = os.path.join(os.path.dirname(args.model_path), f"generated_rirs")
+
     # Create output directory
-    if args.save_path is None:
-        args.save_path = os.path.join(os.path.dirname(args.model_path), f"generated_rirs")
     save_path = Path(args.save_path)
     save_path.mkdir(parents=True, exist_ok=True)
-
-    # Load dataset
-    print("\nLoading dataset...")
-    _, eval_dataset, _ = load_rir_dataset(
-        name='gtu', path=args.dataset_path, split=True, mode='raw',
-        hop_length=data_info['hop_length'], n_fft=data_info['n_fft'],
-        use_spectrogram=data_info['use_spectrogram'],
-        sample_max_sec=data_info['sample_max_sec'],
-        nSamples=data_info['nSamples'], sr_target=data_info['sr_target'],
-        train_ratio=data_info['train_ratio'], eval_ratio=data_info['eval_ratio'],
-        test_ratio=data_info['test_ratio'], random_seed=data_info['random_seed'],
-        split_by_room=data_info['split_by_room']
-    )
-    
-    # Load conditions from dataset
-    conditions, real_rirs_wave, real_rirs_spec, rir_indices, k_factors = load_dataset_conditions(
-        eval_dataset, args.nRIR, data_info, args.rir_indices
-    )
-    conditions = conditions.to(device)
 
     # Generate RIRs
     print(f"\nGenerating {len(rir_indices)} RIRs...")
