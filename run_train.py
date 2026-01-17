@@ -31,7 +31,7 @@ CUDA_VISIBLE_DEVICES=3 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --batch
 def parse_args():
     parser = argparse.ArgumentParser()
     # Model configuration
-    parser.add_argument('--model-config', type=str, default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/model_config_medium.json',
+    parser.add_argument('--model-config', type=str, default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/model_config_cond_encoder_cfg.json',
                         help='Path to model configuration JSON file')
     
     # Training configuration
@@ -53,7 +53,7 @@ def parse_args():
     parser.add_argument('--n-fft', type=int, default=256)
     parser.add_argument('--sr-target', type=int, default=22050, help="Target sampling rate for the RIRs, if None, use original sampling rate")
     parser.add_argument('--scale-rir', type=str2bool, default=True)
-    parser.add_argument('--apply-zero-tail', type=str2bool, default=True, help="Will zero all values of the RIR after -40db (only when scale_rir==True)")
+    parser.add_argument('--apply-zero-tail', type=str2bool, default=False, help="Will zero all values of the RIR after -40db (only when scale_rir==True)")
     parser.add_argument('--db-cutoff', type=float, default=-40.0, help='dB cutoff for EDC cropping in rir scaling')
     
     # Data split arguments
