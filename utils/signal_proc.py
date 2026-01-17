@@ -1,4 +1,3 @@
-import librosa
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -38,27 +37,20 @@ def waveform_to_spectrogram(waveform, hop_length, n_fft, sr=None) -> tuple:
     else:
         raise ValueError(f"Expected 1D or 2D input, got {rir_tensor.dim()}D")
     
-    batch_size = rir_tensor.shape[0]
-    
     # Create Hann window (same as in training)
     window = torch.hann_window(n_fft, device=rir_tensor.device)
-    # Apply STFT to each waveform in the batch
-    batch_specs = []
-    for i in range(batch_size):
-        # Apply STFT (same as training)
-        rir_stft = torch.stft(
-            rir_tensor[i], 
-            n_fft=n_fft, 
-            hop_length=hop_length, 
-            return_complex=True, 
-            window=window
-        )
-        # Stack real and imaginary parts (same as training)
-        rir_spec = torch.stack((rir_stft.real, rir_stft.imag), dim=0)  # [2, F, T]
-        batch_specs.append(rir_spec)
-    
-    # Stack all spectrograms
-    batch_specs = torch.stack(batch_specs, dim=0)  # [B, 2, F, T]    
+
+    # Apply batched STFT (no loop needed - torch.stft supports batch input)
+    rir_stft = torch.stft(
+        rir_tensor,  # [B, T]
+        n_fft=n_fft,
+        hop_length=hop_length,
+        return_complex=True,
+        window=window
+    )  # Output: [B, F, T] complex
+
+    # Stack real and imaginary parts: [B, F, T] -> [B, 2, F, T]
+    batch_specs = torch.stack((rir_stft.real, rir_stft.imag), dim=1)    
     # Remove batch dimension if single input
     if single_input:
         batch_specs = batch_specs.squeeze(0)  # [2, F, T]
@@ -104,37 +96,21 @@ def spectrogram_to_waveform(spectrogram, hop_length, n_fft):
     else:
         raise ValueError(f"Expected 3D or 4D input, got {spec_tensor.dim()}D")
     
-    batch_size = spec_tensor.shape[0]
-    
     # ------- Inverse STFT ---------
     # Create Hann window (same as in forward transform)
     window = torch.hann_window(n_fft, device=spec_tensor.device)
-    # Convert each spectrogram in the batch
-    batch_waveforms = []
-    for i in range(batch_size):
-        # Reconstruct complex spectrogram from real and imaginary parts
-        complex_spec = torch.complex(spec_tensor[i, 0], spec_tensor[i, 1])  # [F, T]
-        
-        # Use torch.istft (inverse of torch.stft used in forward transform)
-        try:
-            waveform = torch.istft(
-                complex_spec, 
-                n_fft=n_fft, 
-                hop_length=hop_length, 
-                window=window,
-                return_complex=False
-            )
-        except Exception as e:
-            print(f"Warning: torch.istft failed for sample {i} ({e}), using librosa fallback")
-            # Fallback to librosa method
-            complex_spec_np = complex_spec.cpu().numpy()
-            waveform = librosa.istft(complex_spec_np, hop_length=hop_length, n_fft=n_fft)
-            waveform = torch.from_numpy(waveform)
-        
-        batch_waveforms.append(waveform)
-    
-    # Stack all waveforms
-    batch_waveforms = torch.stack(batch_waveforms, dim=0)  # [B, T]    
+
+    # Reconstruct complex spectrogram from real and imaginary parts: [B, 2, F, T] -> [B, F, T] complex
+    complex_spec = torch.complex(spec_tensor[:, 0], spec_tensor[:, 1])
+
+    # Apply batched inverse STFT (no loop needed - torch.istft supports batch input)
+    batch_waveforms = torch.istft(
+        complex_spec,  # [B, F, T]
+        n_fft=n_fft,
+        hop_length=hop_length,
+        window=window,
+        return_complex=False
+    )  # Output: [B, T]    
     # Remove batch dimension if single input
     if single_input:
         batch_waveforms = batch_waveforms.squeeze(0)  # [T]
