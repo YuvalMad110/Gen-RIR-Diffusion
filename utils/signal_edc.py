@@ -199,11 +199,14 @@ def create_edc_plots_mode2(real_rirs_wave: list, generated_rirs_wave: list,
                 time_gen, edc_gen = gen_edc(gen_rir, sr, octave_freq)
                 
                 # Plot EDCs
-                ax.plot(time_real, edc_real, '--', linewidth=2, color='green', 
+                ax.plot(time_real, edc_real, '--', linewidth=2, color='green',
                        label=f'Real RIR #{idx}', alpha=0.8)
-                ax.plot(time_gen, edc_gen, '-', linewidth=2, color='blue', 
+                ax.plot(time_gen, edc_gen, '-', linewidth=2, color='blue',
                        label=f'Generated RIR #{idx}', alpha=0.8)
-                
+
+                # Add -40 dB reference line
+                ax.axhline(y=-40, color='red', linestyle='--', linewidth=1, alpha=0.6)
+
                 # Formatting
                 ax.set_xlabel('Time (s)')
                 ax.set_ylabel('Energy Decay (dB)')

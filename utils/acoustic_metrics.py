@@ -745,8 +745,16 @@ def aggregate_metrics(results: List[Dict]) -> Dict:
     # T60
     t60_errors = [r['t60']['broadband'] for r in results]
     t60_abs_errors = [abs(e) for e in t60_errors if e is not None and not np.isnan(e)]
+    t60_perc_errors = []
+    for r in results:
+        t60_gen = r['t60']['broadband_gen']
+        t60_ref = r['t60']['broadband_ref']
+        if (t60_gen is not None and t60_ref is not None and
+            not np.isnan(t60_gen) and not np.isnan(t60_ref) and t60_ref != 0):
+            t60_perc_errors.append(abs(t60_gen - t60_ref) / t60_ref * 100)
     aggregate['t60_error'] = safe_stats(t60_errors)
     aggregate['t60_abs_error'] = safe_stats(t60_abs_errors)
+    aggregate['t60_perc_error'] = safe_stats(t60_perc_errors)
     aggregate['t60_mean_band_abs_error'] = safe_stats([r['t60']['mean_band_abs_error'] for r in results])
     
     # EDT

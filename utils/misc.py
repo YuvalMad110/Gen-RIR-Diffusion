@@ -150,9 +150,17 @@ def extract_losses_from_log(log_path):
     losses = [float(match) for match in re.findall(r"Loss:\s+([0-9.]+)", content)]
     return losses
 
-def get_israel_time():
+def get_israel_time(fmt="%Y-%m-%d_%H-%M-%S"):
+    """Get current time in Israel timezone as formatted string.
+
+    Args:
+        fmt: Format string. Default "%Y-%m-%d_%H-%M-%S" (for filenames).
+             Use "%Y-%m-%d %H:%M:%S" for display.
+    Returns:
+        Formatted datetime string.
+    """
     tz = pytz.timezone("Asia/Jerusalem")
-    return datetime.now(tz)
+    return datetime.now(tz).strftime(fmt)
 
 def str2bool(v):
     if isinstance(v, bool):
