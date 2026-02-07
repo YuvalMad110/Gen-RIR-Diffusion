@@ -57,23 +57,16 @@ def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_t
     lines.extend([
         "", "=" * 70, "EVALUATION CONFIGURATION", "=" * 70,
         f"Model path: {args.model_path}",
-    ])
-
-    # Add dataset path if available
-    if hasattr(args, 'dataset_path'):
-        lines.append(f"Dataset path: {args.dataset_path}")
-
-    lines.extend([
+        f"Dataset path: {getattr(args, 'dataset_path', None)}",
+        f"Speech path (for LSD): {getattr(args, 'speech_path', None)}",
         f"Guidance scale: {args.guidance_scale}",
         f"Scheduler: {'DDIM' if getattr(args, 'use_ddim', False) else 'DDPM'}",
         f"Num inference steps: {args.num_inference_steps}",
         f"Num training steps: {n_train_steps}",
-        f"Batch size: {getattr(args, 'batch_size', 'N/A')}",
-        f"Octave bands: {getattr(args, 'octave_bands', 'N/A')}",
+        f"Batch size: {getattr(args, 'batch_size', None)}",
+        f"Octave bands: {getattr(args, 'octave_bands', None)}",
+        f"Num workers: {getattr(args, 'workers', None)}",
     ])
-
-    if hasattr(args, 'workers'):
-        lines.append(f"Num workers: {args.workers}")
 
     lines.extend([
         "", "-" * 70, "DATA INFO (from training)", "-" * 70,

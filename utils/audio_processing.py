@@ -16,7 +16,7 @@ import librosa
 import soundfile as sf
 from pathlib import Path
 from typing import List, Tuple, Optional
-from scipy.signal import convolve
+from scipy.signal import fftconvolve
 from tqdm import tqdm
 
 
@@ -88,7 +88,7 @@ def convolve_with_rir(speech: np.ndarray, rir: np.ndarray,
     if normalize_rir and np.max(np.abs(rir)) > 0:
         rir = rir / np.max(np.abs(rir))
     
-    reverb = convolve(speech, rir, mode='full')
+    reverb = fftconvolve(speech, rir, mode='full')
     
     if normalize_output and np.max(np.abs(reverb)) > 0:
         reverb = reverb / np.max(np.abs(reverb)) * 0.95
