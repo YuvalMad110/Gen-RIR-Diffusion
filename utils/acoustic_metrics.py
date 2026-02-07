@@ -215,10 +215,14 @@ def t60_error(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
     valid_errors = [e for e in band_errors.values() if not np.isnan(e)]
     mean_error = np.mean(np.abs(valid_errors)) if valid_errors else np.nan
     
+    # Compute percentage error (guard only against division by zero)
+    perc_error = abs(t60_gen - t60_ref) / t60_ref * 100 if t60_ref != 0 else np.nan
+
     return {
         'broadband': t60_gen - t60_ref if not (np.isnan(t60_gen) or np.isnan(t60_ref)) else np.nan,
         'broadband_gen': t60_gen,
         'broadband_ref': t60_ref,
+        'perc': perc_error,
         'per_band': band_errors,
         'mean_band_abs_error': mean_error
     }
@@ -757,13 +761,7 @@ def aggregate_metrics(results: List[Dict]) -> Dict:
     # T60
     t60_errors = [r['t60']['broadband'] for r in results]
     t60_abs_errors = [abs(e) for e in t60_errors if e is not None and not np.isnan(e)]
-    t60_perc_errors = []
-    for r in results:
-        t60_gen = r['t60']['broadband_gen']
-        t60_ref = r['t60']['broadband_ref']
-        if (t60_gen is not None and t60_ref is not None and
-            not np.isnan(t60_gen) and not np.isnan(t60_ref) and t60_ref != 0):
-            t60_perc_errors.append(abs(t60_gen - t60_ref) / t60_ref * 100)
+    t60_perc_errors = [r['t60']['perc'] for r in results]
     aggregate['t60_error'] = safe_stats(t60_errors)
     aggregate['t60_abs_error'] = safe_stats(t60_abs_errors)
     aggregate['t60_perc_error'] = safe_stats(t60_perc_errors)
@@ -794,10 +792,262 @@ def aggregate_metrics(results: List[Dict]) -> Dict:
 
 
 # =============================================================================
+# Artifact Detection
+# =============================================================================
+
+def has_secondary_peak_artifact(rir: np.ndarray, sr: int,
+                                 threshold_db: float = 14.0,
+                                 reference_window_ms: float = 50.0,
+                                 safety_gap_ms: float = 20.0,
+                                 smoothing_ms: float = 20.0,
+                                 min_delay_ms: float = 5.0,
+                                 tail_ignore_ms: float = 100.0,
+                                 save_path: Optional[str] = None) -> bool:
+    """
+    Detect if an RIR contains a secondary peak artifact that violates
+    the expected monotonic decay of energy.
+
+    Uses a state-based prominence approach: compares current energy at time t
+    to the mean energy of a local past reference window. An artifact is detected
+    when the current energy rises significantly above the recent past.
+
+    Args:
+        rir: Room impulse response (1D array)
+        sr: Sampling frequency in Hz
+        threshold_db: Required rise above reference mean to trigger detection (default: 25.0)
+        reference_window_ms: Size of past window to average for reference (default: 50.0)
+        safety_gap_ms: Gap between end of reference window and current point (default: 20.0)
+        smoothing_ms: Window size in ms for Savitzky-Golay smoothing (default: 20.0)
+        min_delay_ms: Minimum delay after main peak before checking (default: 5.0)
+        tail_ignore_ms: Ignore the last N ms of the signal (default: 150.0)
+        save_path: Optional path to save diagnostic plot. If None, no plot is saved.
+
+    Returns:
+        True if secondary peak artifact detected, False otherwise.
+    """
+    rir = np.asarray(rir).flatten()
+
+    # 1. Compute analytic envelope using Hilbert Transform
+    analytic_signal = signal.hilbert(rir)
+    envelope = np.abs(analytic_signal)
+
+    # 2. Convert to dB, normalized to 0 dB at maximum
+    eps = 1e-10
+    env_db = 20 * np.log10(envelope + eps)
+    env_db -= np.max(env_db)
+
+    # 3. Smooth the envelope with Savitzky-Golay filter
+    savgol_window = int((smoothing_ms / 1000.0) * sr)
+    savgol_window = min(savgol_window, len(env_db) // 2)
+    if savgol_window % 2 == 0:
+        savgol_window += 1
+    savgol_window = max(savgol_window, 5)
+
+    smoothed_env = signal.savgol_filter(env_db, savgol_window, polyorder=2)
+
+    # 4. Find main peak and compute analysis start
+    main_peak_idx = np.argmax(smoothed_env)
+    min_delay_samples = int((min_delay_ms / 1000.0) * sr)
+
+    # Convert parameters to samples
+    reference_window_samples = int((reference_window_ms / 1000.0) * sr)
+    safety_gap_samples = int((safety_gap_ms / 1000.0) * sr)
+    tail_ignore_samples = int((tail_ignore_ms / 1000.0) * sr)
+
+    # Analysis can start only after: main_peak + min_delay + reference_window + safety_gap
+    min_valid_idx = main_peak_idx + min_delay_samples + reference_window_samples + safety_gap_samples
+    start_idx = main_peak_idx + min_delay_samples  # For plotting purposes
+
+    # Analysis stops before the last tail_ignore_ms
+    max_valid_idx = len(smoothed_env) - tail_ignore_samples
+
+    if min_valid_idx >= max_valid_idx:
+        if save_path:
+            _plot_secondary_peak_detection(
+                rir, envelope, env_db, smoothed_env, sr,
+                main_peak_idx, start_idx, np.array([]), np.array([]),
+                threshold_db, reference_window_ms, safety_gap_ms, tail_ignore_ms,
+                None, False, save_path
+            )
+        return False  # RIR too short to analyze
+
+    # 5. Compute reference mean using cumulative sum for efficiency
+    # reference_mean[t] = mean of smoothed_env from (t - safety_gap - ref_window) to (t - safety_gap)
+    cumsum = np.cumsum(smoothed_env)
+
+    # Vectorized computation of reference means
+    # For index t, reference window is [t - safety_gap - ref_window, t - safety_gap)
+    analysis_indices = np.arange(min_valid_idx, max_valid_idx)
+
+    ref_end_indices = analysis_indices - safety_gap_samples  # End of reference window (exclusive)
+    ref_start_indices = ref_end_indices - reference_window_samples  # Start of reference window
+
+    # Compute cumsum differences for window means
+    # cumsum[end-1] - cumsum[start-1] gives sum from start to end-1
+    cumsum_at_end = cumsum[ref_end_indices - 1]
+    cumsum_at_start = np.where(ref_start_indices > 0, cumsum[ref_start_indices - 1], 0)
+    reference_means = (cumsum_at_end - cumsum_at_start) / reference_window_samples
+
+    # Current envelope values at analysis points
+    current_values = smoothed_env[analysis_indices]
+
+    # Delta from local mean
+    delta_from_mean = current_values - reference_means
+
+    # 6. Detection: find where delta exceeds threshold
+    artifact_detected = False
+    artifact_idx = None
+
+    above_threshold_mask = delta_from_mean > threshold_db
+    if np.any(above_threshold_mask):
+        artifact_detected = True
+        first_artifact_pos = np.argmax(above_threshold_mask)
+        artifact_idx = analysis_indices[first_artifact_pos]
+
+    # Save diagnostic plot if requested
+    if save_path:
+        _plot_secondary_peak_detection(
+            rir, envelope, env_db, smoothed_env, sr,
+            main_peak_idx, start_idx, analysis_indices, delta_from_mean,
+            threshold_db, reference_window_ms, safety_gap_ms, tail_ignore_ms,
+            artifact_idx, artifact_detected, save_path
+        )
+
+    return artifact_detected
+
+
+def _plot_secondary_peak_detection(rir, envelope, env_db, smoothed_env, sr,
+                                    main_peak_idx, start_idx, analysis_indices,
+                                    delta_from_mean, threshold_db,
+                                    reference_window_ms, safety_gap_ms, tail_ignore_ms,
+                                    artifact_idx, artifact_detected, save_path):
+    """Helper function to create diagnostic plot for secondary peak detection."""
+    import matplotlib.pyplot as plt
+
+    time_ms = np.arange(len(rir)) / sr * 1000  # Time in milliseconds
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+
+    # Colors
+    color_waveform = '#1f77b4'
+    color_envelope = '#ff7f0e'
+    color_smoothed = '#2ca02c'
+    color_threshold = '#d62728'
+    color_artifact = '#d62728'
+    color_reference = '#9467bd'
+
+    # --- Plot 1: Waveform + Envelope ---
+    ax1 = axes[0]
+    ax1.plot(time_ms, rir, color=color_waveform, alpha=0.6, linewidth=0.5, label='Waveform')
+    ax1.plot(time_ms, envelope, color=color_envelope, linewidth=1.5, label='Hilbert Envelope')
+    ax1.axvline(x=main_peak_idx / sr * 1000, color='green', linestyle='--',
+                linewidth=1.5, label=f'Main Peak ({main_peak_idx / sr * 1000:.1f} ms)')
+    ax1.set_ylabel('Amplitude')
+    ax1.set_title('Waveform with Hilbert Envelope')
+    ax1.legend(loc='upper right')
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xlim(0, time_ms[-1])
+
+    # --- Plot 2: Smoothed Envelope (dB) with reference window illustration ---
+    ax2 = axes[1]
+    ax2.plot(time_ms, env_db, color=color_envelope, alpha=0.4, linewidth=0.8, label='Envelope (dB)')
+    ax2.plot(time_ms, smoothed_env, color=color_smoothed, linewidth=1.5, label='Smoothed Envelope (dB)')
+    ax2.axvline(x=main_peak_idx / sr * 1000, color='green', linestyle='--',
+                linewidth=1.5, label='Main Peak')
+    if start_idx < len(smoothed_env):
+        ax2.axvline(x=start_idx / sr * 1000, color='purple', linestyle=':',
+                    linewidth=1.5, label=f'Analysis Start ({start_idx / sr * 1000:.1f} ms)')
+    if artifact_idx is not None:
+        artifact_time_ms = artifact_idx / sr * 1000
+        ax2.axvline(x=artifact_time_ms, color=color_artifact, linestyle='-',
+                    linewidth=2, label=f'Artifact Detected ({artifact_time_ms:.1f} ms)')
+        ax2.plot(artifact_time_ms, smoothed_env[artifact_idx], 'o',
+                 color=color_artifact, markersize=10)
+
+        # Draw reference window and gap illustration at artifact point
+        ref_end_ms = artifact_time_ms - safety_gap_ms
+        ref_start_ms = ref_end_ms - reference_window_ms
+        y_level = smoothed_env[artifact_idx]
+
+        # Reference window bracket
+        ax2.annotate('', xy=(ref_start_ms, y_level - 5), xytext=(ref_end_ms, y_level - 5),
+                     arrowprops=dict(arrowstyle='<->', color=color_reference, lw=2))
+        ax2.text((ref_start_ms + ref_end_ms) / 2, y_level - 8, 'Ref Window',
+                 ha='center', va='top', fontsize=9, color=color_reference)
+
+        # Safety gap bracket
+        ax2.annotate('', xy=(ref_end_ms, y_level - 5), xytext=(artifact_time_ms, y_level - 5),
+                     arrowprops=dict(arrowstyle='<->', color='orange', lw=2))
+        ax2.text((ref_end_ms + artifact_time_ms) / 2, y_level - 8, 'Gap',
+                 ha='center', va='top', fontsize=9, color='orange')
+
+    # Show tail ignore region
+    tail_start_ms = time_ms[-1] - tail_ignore_ms
+    ax2.axvline(x=tail_start_ms, color='brown', linestyle='--',
+                linewidth=1.5, label=f'Tail Ignore ({tail_start_ms:.0f} ms)')
+    ax2.axvspan(tail_start_ms, time_ms[-1], alpha=0.1, color='brown')
+
+    ax2.set_ylabel('Amplitude (dB)')
+    ax2.set_title('Smoothed Envelope in dB')
+    ax2.legend(loc='upper right')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_ylim(bottom=-80)
+    ax2.set_xlim(0, time_ms[-1])
+
+    # --- Plot 3: Delta from Local Mean ---
+    ax3 = axes[2]
+    if len(delta_from_mean) > 0:
+        analysis_times_ms = analysis_indices / sr * 1000
+        ax3.plot(analysis_times_ms, delta_from_mean, color=color_smoothed,
+                 linewidth=1.5, label='Delta from Local Mean')
+        # Zero line
+        ax3.axhline(y=0, color='gray', linestyle='-', linewidth=1, alpha=0.7, label='Zero (no change)')
+        # Threshold line
+        ax3.axhline(y=threshold_db, color=color_threshold, linestyle='--',
+                    linewidth=2, label=f'Threshold (+{threshold_db} dB)')
+        # Fill region above threshold
+        ax3.fill_between(analysis_times_ms, delta_from_mean, threshold_db,
+                         where=(delta_from_mean > threshold_db),
+                         color=color_artifact, alpha=0.3)
+        if artifact_idx is not None:
+            artifact_pos = np.where(analysis_indices == artifact_idx)[0]
+            if len(artifact_pos) > 0:
+                ax3.plot(artifact_idx / sr * 1000, delta_from_mean[artifact_pos[0]], 'o',
+                         color=color_artifact, markersize=10, label='Detection Point')
+
+    # Add parameters text box
+    params_text = (f'Parameters:\n'
+                   f'  Reference Window: {reference_window_ms:.0f} ms\n'
+                   f'  Safety Gap: {safety_gap_ms:.0f} ms\n'
+                   f'  Threshold: {threshold_db:.1f} dB\n'
+                   f'  Tail Ignore: {tail_ignore_ms:.0f} ms')
+    ax3.text(0.02, 0.98, params_text, transform=ax3.transAxes,
+             fontsize=9, verticalalignment='top', fontfamily='monospace',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    ax3.set_ylabel('Delta from Local Mean (dB)')
+    ax3.set_xlabel('Time (ms)')
+    ax3.set_title('Energy Rise Above Local Reference (current - mean of past window)')
+    ax3.legend(loc='upper right')
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xlim(0, time_ms[-1])
+
+    # Overall title with detection result
+    result_str = "ARTIFACT DETECTED" if artifact_detected else "No artifact detected"
+    result_color = color_artifact if artifact_detected else 'green'
+    fig.suptitle(f'Secondary Peak Artifact Detection: {result_str}',
+                 fontsize=14, fontweight='bold', color=result_color)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+# =============================================================================
 # Utility Functions
 # =============================================================================
 
-def align_rir_lengths(rir1: np.ndarray, rir2: np.ndarray, 
+def align_rir_lengths(rir1: np.ndarray, rir2: np.ndarray,
                       mode: str = 'truncate') -> Tuple[np.ndarray, np.ndarray]:
     """
     Align two RIRs to the same length.

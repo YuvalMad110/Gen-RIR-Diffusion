@@ -170,6 +170,7 @@ def plot_all_histograms(all_metrics, save_dir):
     metrics_to_plot = [
         ([r['t60']['broadband'] for r in all_metrics], 'T60 Error', 's', 'hist_t60_error.png'),
         ([abs(e) for e in [r['t60']['broadband'] for r in all_metrics] if e is not None and not np.isnan(e)], 'T60 Absolute Error', 's', 'hist_t60_abs_error.png'),
+        ([r['t60']['perc'] for r in all_metrics], 'T60 Percentage Error', '%', 'hist_t60_perc_error.png'),
         ([r['drr']['error'] for r in all_metrics], 'DRR Error', 'dB', 'hist_drr_error.png'),
         ([r['edt']['error'] for r in all_metrics], 'EDT Error', 's', 'hist_edt_error.png'),
         ([r['c50']['error'] for r in all_metrics], 'C50 Error', 'dB', 'hist_c50_error.png'),
@@ -187,11 +188,12 @@ def plot_all_histograms(all_metrics, save_dir):
 
 def plot_histograms_summary(all_metrics, n_samples, save_path):
     """Create a summary figure with all histograms in one image."""
-    fig, axes = plt.subplots(3, 3, figsize=(18, 12))
+    fig, axes = plt.subplots(2, 5, figsize=(25, 10))
 
     metrics_data = [
         ([r['t60']['broadband'] for r in all_metrics], 'T60 Error (s)', 'T60'),
         ([abs(r['t60']['broadband']) for r in all_metrics if r['t60']['broadband'] is not None and not np.isnan(r['t60']['broadband'])], 'T60 Abs Error (s)', '|T60|'),
+        ([r['t60']['perc'] for r in all_metrics], 'T60 Perc Error (%)', 'T60%'),
         ([r['drr']['error'] for r in all_metrics], 'DRR Error (dB)', 'DRR'),
         ([r['edt']['error'] for r in all_metrics], 'EDT Error (s)', 'EDT'),
         ([r['c50']['error'] for r in all_metrics], 'C50 Error (dB)', 'C50'),

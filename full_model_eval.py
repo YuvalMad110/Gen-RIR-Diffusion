@@ -236,7 +236,7 @@ def main():
 
     # Select representative samples based on hardcoded metrics
     print("\nSelecting representative samples...")
-    metric_names = ['t60', 'lsd']  # Hardcoded: T60 Abs Error and LSD
+    metric_names = ['t60_perc']
     selected_samples = select_representative_samples(all_samples, metric_names)
 
     # ---------- Reporting and Visualization ----------

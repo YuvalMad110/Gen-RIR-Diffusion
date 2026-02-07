@@ -11,7 +11,7 @@ import numpy as np
 # Metric extractors for selecting samples
 METRIC_EXTRACTORS = {
     't60': lambda m: abs(m['t60']['broadband']) if not np.isnan(m['t60']['broadband']) else np.inf,
-    't60_perc': lambda m: _t60_perc_extractor(m),
+    't60_perc': lambda m: m['t60']['perc'] if not np.isnan(m['t60']['perc']) else np.inf,
     'lsd': lambda m: m['lsd']['broadband'],
     'edt': lambda m: abs(m['edt']['broadband']) if not np.isnan(m['edt']['broadband']) else np.inf,
     'drr': lambda m: abs(m['drr']['broadband']) if not np.isnan(m['drr']['broadband']) else np.inf,
@@ -20,16 +20,6 @@ METRIC_EXTRACTORS = {
     'edc': lambda m: m['edc_distance']['broadband'],
     'cosine': lambda m: m['cosine_similarity'],
 }
-
-
-def _t60_perc_extractor(m):
-    """Extract T60 percentage error from metrics dict."""
-    t60_gen = m['t60']['broadband_gen']
-    t60_ref = m['t60']['broadband_ref']
-    if (t60_gen is not None and t60_ref is not None and
-        not np.isnan(t60_gen) and not np.isnan(t60_ref) and t60_ref != 0):
-        return abs(t60_gen - t60_ref) / t60_ref * 100
-    return np.inf
 
 
 def select_representative_samples(all_samples, metric_names, n_samples_per_category=4):
