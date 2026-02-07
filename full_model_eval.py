@@ -15,6 +15,7 @@ import os
 import sys
 import torch
 import numpy as np
+import librosa
 from pathlib import Path
 from tqdm import tqdm
 import matplotlib
@@ -42,7 +43,7 @@ from utils.visualization import (
 # Evaluation Core
 # =============================================================================
 
-def evaluate_test_set(model, test_dataloader, device, data_info, args):
+def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signal=None):
     """Run evaluation over the entire test set."""
     model.eval()
 
@@ -120,7 +121,7 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args):
             # Evaluate each pair and store all samples
             for i in range(batch_size):
                 rir_gen, rir_ref = align_rir_lengths(gen_waveforms[i], real_waveforms[i], mode='truncate')
-                metrics = evaluate_rir_pair(rir_gen, rir_ref, sr, octave_bands)
+                metrics = evaluate_rir_pair(rir_gen, rir_ref, sr, octave_bands, dry_signal=dry_signal)
                 all_metrics.append(metrics)
 
                 # Store all samples for later selection
@@ -156,6 +157,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu)")
     parser.add_argument("--workers", type=int, default=4, help="DataLoader workers")
     parser.add_argument("--debug_mode", type=bool, default=False, help="Debug mode: fast run")
+    parser.add_argument("--speech_path", type=str, default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/data/1195-130164-0010.wav', help="Path to clean speech for reverbed LSD computation")
     return parser.parse_args()
 
 
@@ -170,6 +172,11 @@ def main():
     print("\nLoading model...")
     model, data_info = load_model_and_data_info(args.model_path, device, RIRDiffusionModel)
     args.num_inference_steps = args.num_inference_steps or model.n_timesteps
+
+    # ---------- Load clean speech for reverbed LSD ----------
+    print(f"\nLoading clean speech from: {args.speech_path}")
+    dry_signal, _ = librosa.load(args.speech_path, sr=data_info['sr_target'])
+    print(f"Speech loaded: {len(dry_signal)} samples ({len(dry_signal)/data_info['sr_target']:.2f}s)")
 
     # Debug mode overrides
     if args.debug_mode:
@@ -225,7 +232,7 @@ def main():
     )
 
     # ---------- Run evaluation ----------
-    aggregate, all_metrics, all_samples = evaluate_test_set(model, test_dataloader, device, data_info, args)
+    aggregate, all_metrics, all_samples = evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signal)
 
     # Select representative samples based on hardcoded metrics
     print("\nSelecting representative samples...")

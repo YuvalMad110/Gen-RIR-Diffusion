@@ -422,85 +422,97 @@ def clarity_error(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
 # LSD (Log-Spectral Distance)
 # =============================================================================
 
-def compute_lsd(rir_gen: np.ndarray, rir_ref: np.ndarray, 
-                n_fft: int = 2048, eps: float = 1e-10) -> float:
+def compute_lsd(rir_gen: np.ndarray, rir_ref: np.ndarray, dry_signal: np.ndarray = None, n_fft: int = 2048, eps: float = 1e-10) -> float:
     """
     Compute Log-Spectral Distance (LSD).
-    
+
     LSD = sqrt(mean((10*log10(|H_ref|²) - 10*log10(|H_gen|²))²))
-    
+
+    If dry_signal is provided, computes LSD on reverbed signals (RIR convolved with dry signal).
+    Otherwise computes LSD directly on the RIR frequency responses.
+
     Args:
         rir_gen: Generated RIR
         rir_ref: Reference RIR
+        dry_signal: Optional dry signal to convolve with RIRs for reverbed LSD
         n_fft: FFT size
         eps: Small constant for numerical stability
-    
+
     Returns:
         LSD in dB
     """
     rir_gen = np.asarray(rir_gen).flatten()
     rir_ref = np.asarray(rir_ref).flatten()
-    
+
+    # If dry signal provided, compute reverbed signals
+    if dry_signal is not None:
+        dry_signal = np.asarray(dry_signal).flatten()
+        sig_gen = signal.fftconvolve(dry_signal, rir_gen, mode='full')
+        sig_ref = signal.fftconvolve(dry_signal, rir_ref, mode='full')
+    else:
+        sig_gen = rir_gen
+        sig_ref = rir_ref
+
     # Zero-pad to same length
-    max_len = max(len(rir_gen), len(rir_ref), n_fft)
-    rir_gen_pad = np.zeros(max_len)
-    rir_ref_pad = np.zeros(max_len)
-    rir_gen_pad[:len(rir_gen)] = rir_gen
-    rir_ref_pad[:len(rir_ref)] = rir_ref
-    
+    max_len = max(len(sig_gen), len(sig_ref), n_fft)
+    sig_gen_pad = np.zeros(max_len)
+    sig_ref_pad = np.zeros(max_len)
+    sig_gen_pad[:len(sig_gen)] = sig_gen
+    sig_ref_pad[:len(sig_ref)] = sig_ref
+
     # Compute magnitude spectra
-    H_gen = np.abs(np.fft.rfft(rir_gen_pad, n=n_fft))
-    H_ref = np.abs(np.fft.rfft(rir_ref_pad, n=n_fft))
-    
+    H_gen = np.abs(np.fft.rfft(sig_gen_pad, n=n_fft))
+    H_ref = np.abs(np.fft.rfft(sig_ref_pad, n=n_fft))
+
     # Log power spectra
     log_H_gen = 10 * np.log10(H_gen ** 2 + eps)
     log_H_ref = 10 * np.log10(H_ref ** 2 + eps)
-    
+
     # LSD
     lsd = np.sqrt(np.mean((log_H_ref - log_H_gen) ** 2))
-    
+
     return lsd
 
 
-def compute_lsd_octave_bands(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
-                              center_freqs: List[float] = None) -> Dict[float, float]:
+def compute_lsd_octave_bands(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int, center_freqs: List[float] = None, dry_signal: np.ndarray = None) -> Dict[float, float]:
     """
     Compute LSD per octave band.
-    
+
     Args:
         rir_gen: Generated RIR
         rir_ref: Reference RIR
         sr: Sample rate
         center_freqs: Octave band center frequencies
-    
+        dry_signal: Optional dry signal to convolve with RIRs for reverbed LSD
+
     Returns:
         Dictionary mapping center frequency to LSD
     """
     if center_freqs is None:
         center_freqs = [125, 250, 500, 1000, 2000, 4000]
-    
+
     rir_gen = np.asarray(rir_gen).flatten()
     rir_ref = np.asarray(rir_ref).flatten()
-    
+
     lsds = {}
     nyquist = sr / 2
-    
+
     for fc in center_freqs:
         f_low = fc / np.sqrt(2)
         f_high = fc * np.sqrt(2)
-        
+
         if f_low >= nyquist:
             continue
         f_high = min(f_high, nyquist * 0.99)
-        
+
         try:
             sos = signal.butter(4, [f_low, f_high], btype='band', fs=sr, output='sos')
             gen_filt = signal.sosfilt(sos, rir_gen)
             ref_filt = signal.sosfilt(sos, rir_ref)
-            lsds[fc] = compute_lsd(gen_filt, ref_filt)
+            lsds[fc] = compute_lsd(gen_filt, ref_filt, dry_signal=dry_signal)
         except Exception:
             continue
-    
+
     return lsds
 
 
@@ -637,23 +649,23 @@ def edc_distance_octave_bands(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
 # Comprehensive Evaluation
 # =============================================================================
 
-def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
-                      center_freqs: List[float] = None) -> Dict:
+def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int, center_freqs: List[float] = None, dry_signal: np.ndarray = None) -> Dict:
     """
     Comprehensive evaluation of a generated RIR against reference.
-    
+
     Args:
         rir_gen: Generated RIR
         rir_ref: Reference RIR
         sr: Sample rate
         center_freqs: Octave band center frequencies
-    
+        dry_signal: Optional dry signal to convolve with RIRs for reverbed LSD
+
     Returns:
         Dictionary containing all metrics
     """
     if center_freqs is None:
         center_freqs = [125, 250, 500, 1000, 2000, 4000]
-    
+
     results = {
         # T60
         't60': t60_error(rir_gen, rir_ref, sr, center_freqs),
@@ -668,10 +680,10 @@ def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
         'c50': clarity_error(rir_gen, rir_ref, sr, time_ms=50),
         'c80': clarity_error(rir_gen, rir_ref, sr, time_ms=80),
 
-        # Spectral
+        # Spectral (reverbed LSD if dry_signal provided)
         'lsd': {
-            'broadband': compute_lsd(rir_gen, rir_ref),
-            'per_band': compute_lsd_octave_bands(rir_gen, rir_ref, sr, center_freqs)
+            'broadband': compute_lsd(rir_gen, rir_ref, dry_signal=dry_signal),
+            'per_band': compute_lsd_octave_bands(rir_gen, rir_ref, sr, center_freqs, dry_signal=dry_signal)
         },
 
         # EDC
