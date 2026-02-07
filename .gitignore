@@ -1,5 +1,6 @@
 # YM
 outputs/
+data/data_analysis/
 *.wav
 
 # Byte-compiled / optimized / DLL files
