@@ -81,7 +81,7 @@ def load_selected_rirs(selected_rir_path, device, data_info):
         conditions: Tensor of conditions [N, 10] on device
         real_rirs_wave: List of reference RIR waveforms
         real_rirs_spec: List of reference RIR spectrograms
-        quality_labels: List of quality labels ('best', 'worst', 'median', 'mean')
+        quality_labels: List of quality labels (e.g., 'best_1', 'best_2', ..., 'worst_1', ...)
         k_factors: Tensor of k-factors if scaling is enabled, else None
     """
     print(f"\nLoading selected RIRs from: {selected_rir_path}")
@@ -94,6 +94,7 @@ def load_selected_rirs(selected_rir_path, device, data_info):
     print(f"Loaded samples for metric: {metric_name}")
 
     # Extract samples in order: best, worst, median, mean
+    # Each category contains a list of samples
     quality_order = ['best', 'worst', 'median', 'mean']
 
     conditions_list = []
@@ -101,12 +102,16 @@ def load_selected_rirs(selected_rir_path, device, data_info):
     quality_labels = []
 
     for quality in quality_order:
-        sample = samples_dict[quality]['sample']
-        conditions_list.append(torch.tensor(sample['condition'], dtype=torch.float32))
-        real_rirs_wave.append(sample['reference'])
-        quality_labels.append(quality)
+        samples_list = samples_dict[quality]
 
-        print(f"  {quality}: idx={samples_dict[quality]['idx']}, value={samples_dict[quality]['value']:.4f}")
+        print(f"  {quality} ({len(samples_list)} samples):")
+        for i, sample_entry in enumerate(samples_list):
+            sample = sample_entry['sample']
+            conditions_list.append(torch.tensor(sample['condition'], dtype=torch.float32))
+            real_rirs_wave.append(sample['reference'])
+            quality_labels.append(f"{quality}_{i+1}")
+
+            print(f"    #{i+1}: idx={sample_entry['idx']}, value={sample_entry['value']:.4f}")
 
     conditions = torch.stack(conditions_list).to(device)
 
