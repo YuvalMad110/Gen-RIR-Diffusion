@@ -16,7 +16,6 @@ from RIRDiffusionModel import RIRDiffusionModel
 from diffusers import DDPMScheduler
 from trainer import DiffusionTrainer
 from utils.misc import str2bool
-from utils.signal_scaling2 import scaled_rir_collate_fn
 """
 CUDA_VISIBLE_DEVICES=1,2,3 /home/yuvalmad/python312/bin/accelerate launch --multi_gpu --num_processes=3 ./Projects/Gen-RIR-Diffusion/run_train.py --batch-size 16 --epochs 100 --nSamples 128 \
 |& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
@@ -167,8 +166,8 @@ def main():
     print(f"Dataset splits: {len(train_dataset)} - {len(eval_dataset)} - {len(test_dataset)}")
     
     # ---------- Create dataloaders ----------
-    collate_fn = scale_and_spectrogram_collate_fn(sr=args.sr_target, db_cutoff=args.db_cutoff, n_fft=args.n_fft, 
-        hop_length=args.hop_length, scale_rir_flag=args.scale_rir, use_spectrogram=True, apply_zero_tail=args.apply_zero_tail)
+    collate_fn = scale_and_spectrogram_collate_fn(sr=args.sr_target, db_cutoff=args.db_cutoff, n_fft=args.n_fft,
+        hop_length=args.hop_length, scale_rir_flag=args.scale_rir, use_spectrogram=False, apply_zero_tail=args.apply_zero_tail)
     
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
         collate_fn=collate_fn, drop_last=True, pin_memory=torch.cuda.is_available())
@@ -211,6 +210,8 @@ def main():
         checkpoint_freq=args.checkpoint_freq,
         eval_freq=args.eval_freq,
         data_info=data_info,
+        n_fft=args.n_fft,
+        hop_length=args.hop_length,
     )
     
     # ---------- Train ----------

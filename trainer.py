@@ -9,6 +9,7 @@ import shutil
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from utils.misc import save_metric, get_timestamped_logdir, plot_signals
+from utils.signal_proc import waveform_to_spectrogram
 from tqdm import tqdm
 from diffusers import DDPMScheduler
 
@@ -30,7 +31,9 @@ class DiffusionTrainer():
                  model=None,
                  optimizer=None,
                  noise_scheduler=None,
-                 accelerator=None,):
+                 accelerator=None,
+                 n_fft=256,
+                 hop_length=64):
         """
         Initialize the RIR generator.
         """
@@ -46,6 +49,8 @@ class DiffusionTrainer():
         self.eval_freq = eval_freq
         self.logdir = get_timestamped_logdir('outputs/not_completed')
         self.data_info = data_info if data_info is not None else {}
+        self.n_fft = n_fft
+        self.hop_length = hop_length
          # Setup Accelerator for DDP/AMP
         self.accelerator = accelerator
         if self.accelerator.is_main_process:
@@ -81,7 +86,7 @@ class DiffusionTrainer():
                         f"          [Accelerator] is_distributed: {self.accelerator.distributed_type != 'NO'} | nProcesses: {self.accelerator.num_processes} | Device: {self.accelerator.device}\n"
                         f"          [Dataloader] Train size: {len(train_dataloader.dataset)} | len(train_loader): {len(train_dataloader)} | Val size: {len(eval_dataloader.dataset)}\n"
                         f"          [RunParams] Epochs: {self.epochs} | Batch size: {math.ceil(len(train_dataloader.dataset) / len(train_dataloader))} | Eval freq: {self.eval_freq}\n"
-                        f"          [Model] LR: {self.lr} | Sample-Size: {self.data_info["sample_size"]} | n_timesteps: {self.model.n_timesteps}\n" #  | nParams: {self.model.count_parameters()}
+                        f"          [Model] LR: {self.lr} | Sample-Size: {self.data_info["sample_size"]} | n_timesteps: {self.noise_scheduler.num_train_timesteps}\n" #  | nParams: {self.model.count_parameters()}
                         f"          [Data] {self.data_info}\n\n")
             
         # ============= Start Epoch loop =============
@@ -160,8 +165,10 @@ class DiffusionTrainer():
     def _forward_step(self, rir, room_dim, mic_loc, speaker_loc, rt60, training=True, scaler=None):
         """Common forward step for training and evaluation"""
         # prepare data
-        rir = rir.to(self.device) # [B, 1, T] or [B, F, T]  
-        condition = torch.cat([room_dim, mic_loc, speaker_loc, rt60.unsqueeze(1)], dim=1).to(self.device).float() # [B, 10]
+        rir = rir.to(self.device)  # [B, T] waveform
+        rir = waveform_to_spectrogram(rir, hop_length=self.hop_length, n_fft=self.n_fft)  # [B, 2, F, T]
+
+        condition = torch.cat([room_dim, mic_loc, speaker_loc, rt60.unsqueeze(1)], dim=1).to(self.device).float()  # [B, 10]
         noise = torch.randn_like(rir).to(self.device)
 
         # Sample a random timestep for each image
