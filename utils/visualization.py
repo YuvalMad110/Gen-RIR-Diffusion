@@ -142,32 +142,12 @@ def _calculate_edc_numpy(rir: np.ndarray) -> np.ndarray:
 # Evaluation Visualization Functions
 # =============================================================================
 
-def plot_metric_histogram(values, metric_name, unit, save_path, bins=30):
-    """Plot histogram for a single metric."""
-    values = [v for v in values if v is not None and not np.isnan(v) and not np.isinf(v)]
-    if not values:
-        return
+def _extract_metric_values(all_metrics):
+    """Extract metric value lists from per-sample metrics for histogram plotting.
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.hist(values, bins=bins, edgecolor='black', alpha=0.7, color='steelblue')
-    ax.axvline(np.mean(values), color='red', linestyle='--', linewidth=2, label=f'Mean: {np.mean(values):.3f}')
-    ax.axvline(np.median(values), color='orange', linestyle='--', linewidth=2, label=f'Median: {np.median(values):.3f}')
-    ax.set_xlabel(f'{metric_name} ({unit})', fontsize=12)
-    ax.set_ylabel('Count', fontsize=12)
-    ax.set_title(f'{metric_name} Distribution (n={len(values)})', fontsize=14)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
-
-
-def plot_all_histograms(all_metrics, save_dir):
-    """Generate histograms for all metrics."""
-    save_dir = Path(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    metrics_to_plot = [
+    Returns list of (values, name, unit, filename) tuples.
+    """
+    return [
         ([r['t60']['broadband'] for r in all_metrics], 'T60 Error', 's', 'hist_t60_error.png'),
         ([abs(e) for e in [r['t60']['broadband'] for r in all_metrics] if e is not None and not np.isnan(e)], 'T60 Absolute Error', 's', 'hist_t60_abs_error.png'),
         ([r['t60']['perc'] for r in all_metrics], 'T60 Percentage Error', '%', 'hist_t60_perc_error.png'),
@@ -180,35 +160,100 @@ def plot_all_histograms(all_metrics, save_dir):
         ([r['cosine_similarity'] for r in all_metrics], 'Cosine Similarity', '', 'hist_cosine_similarity.png'),
     ]
 
-    for values, name, unit, filename in metrics_to_plot:
-        plot_metric_histogram(values, name, unit, save_dir / filename)
+
+def _clean_values(values):
+    """Filter out None, NaN, Inf values."""
+    return [v for v in values if v is not None and not np.isnan(v) and not np.isinf(v)]
+
+
+def plot_metric_histogram(values, metric_name, unit, save_path, bins=30, baseline_values=None):
+    """Plot histogram for a single metric, optionally overlaying baseline."""
+    values = _clean_values(values)
+    if not values:
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    if baseline_values is not None:
+        baseline_values = _clean_values(baseline_values)
+
+    if baseline_values:
+        # Compute shared bin edges across both distributions
+        all_vals = values + baseline_values
+        bin_edges = np.histogram_bin_edges(all_vals, bins=bins)
+        ax.hist(values, bins=bin_edges, edgecolor='black', alpha=0.6, color='steelblue', label='Diffusion')
+        ax.hist(baseline_values, bins=bin_edges, edgecolor='black', alpha=0.4, color='coral', label='Baseline')
+        ax.axvline(np.mean(values), color='blue', linestyle='--', linewidth=2, label=f'Diff Mean: {np.mean(values):.3f}')
+        ax.axvline(np.mean(baseline_values), color='red', linestyle='--', linewidth=2, label=f'Base Mean: {np.mean(baseline_values):.3f}')
+    else:
+        ax.hist(values, bins=bins, edgecolor='black', alpha=0.7, color='steelblue')
+        ax.axvline(np.mean(values), color='red', linestyle='--', linewidth=2, label=f'Mean: {np.mean(values):.3f}')
+        ax.axvline(np.median(values), color='orange', linestyle='--', linewidth=2, label=f'Median: {np.median(values):.3f}')
+
+    ax.set_xlabel(f'{metric_name} ({unit})', fontsize=12)
+    ax.set_ylabel('Count', fontsize=12)
+    ax.set_title(f'{metric_name} Distribution (n={len(values)})', fontsize=14)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+
+def plot_all_histograms(all_metrics, save_dir, baseline_all_metrics=None):
+    """Generate histograms for all metrics, optionally overlaying baseline."""
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics_to_plot = _extract_metric_values(all_metrics)
+    baseline_to_plot = _extract_metric_values(baseline_all_metrics) if baseline_all_metrics else None
+
+    for i, (values, name, unit, filename) in enumerate(metrics_to_plot):
+        base_vals = baseline_to_plot[i][0] if baseline_to_plot else None
+        plot_metric_histogram(values, name, unit, save_dir / filename, baseline_values=base_vals)
 
     print(f"Histograms saved to {save_dir}")
 
 
-def plot_histograms_summary(all_metrics, n_samples, save_path):
-    """Create a summary figure with all histograms in one image."""
+def plot_histograms_summary(all_metrics, n_samples, save_path, baseline_all_metrics=None):
+    """Create a summary figure with all histograms in one image, optionally overlaying baseline."""
     fig, axes = plt.subplots(2, 5, figsize=(25, 10))
 
     metrics_data = [
-        ([r['t60']['broadband'] for r in all_metrics], 'T60 Error (s)', 'T60'),
-        ([abs(r['t60']['broadband']) for r in all_metrics if r['t60']['broadband'] is not None and not np.isnan(r['t60']['broadband'])], 'T60 Abs Error (s)', '|T60|'),
-        ([r['t60']['perc'] for r in all_metrics], 'T60 Perc Error (%)', 'T60%'),
-        ([r['drr']['error'] for r in all_metrics], 'DRR Error (dB)', 'DRR'),
-        ([r['edt']['error'] for r in all_metrics], 'EDT Error (s)', 'EDT'),
-        ([r['c50']['error'] for r in all_metrics], 'C50 Error (dB)', 'C50'),
-        ([r['c80']['error'] for r in all_metrics], 'C80 Error (dB)', 'C80'),
-        ([r['lsd']['broadband'] for r in all_metrics], 'LSD (dB)', 'LSD'),
-        ([r['edc_distance']['broadband'] for r in all_metrics], 'EDC Dist (dB²)', 'EDC'),
-        ([r['cosine_similarity'] for r in all_metrics], 'Cosine Similarity', 'Cos Sim'),
+        ('T60 Error (s)', 'T60',     lambda m: m['t60']['broadband']),
+        ('T60 Abs Error (s)', '|T60|', lambda m: abs(m['t60']['broadband']) if m['t60']['broadband'] is not None and not np.isnan(m['t60']['broadband']) else np.nan),
+        ('T60 Perc Error (%)', 'T60%', lambda m: m['t60']['perc']),
+        ('DRR Error (dB)', 'DRR',     lambda m: m['drr']['error']),
+        ('EDT Error (s)', 'EDT',       lambda m: m['edt']['error']),
+        ('C50 Error (dB)', 'C50',     lambda m: m['c50']['error']),
+        ('C80 Error (dB)', 'C80',     lambda m: m['c80']['error']),
+        ('LSD (dB)', 'LSD',           lambda m: m['lsd']['broadband']),
+        ('EDC Dist (dB²)', 'EDC',     lambda m: m['edc_distance']['broadband']),
+        ('Cosine Similarity', 'Cos Sim', lambda m: m['cosine_similarity']),
     ]
 
-    for ax, (values, ylabel, title) in zip(axes.flatten(), metrics_data):
-        values = [v for v in values if v is not None and not np.isnan(v) and not np.isinf(v)]
+    for ax, (ylabel, title, extractor) in zip(axes.flatten(), metrics_data):
+        values = _clean_values([extractor(m) for m in all_metrics])
+
+        if baseline_all_metrics:
+            base_values = _clean_values([extractor(m) for m in baseline_all_metrics])
+        else:
+            base_values = None
+
         if values:
-            ax.hist(values, bins=25, edgecolor='black', alpha=0.7, color='steelblue')
-            ax.axvline(np.mean(values), color='red', linestyle='--', linewidth=1.5)
-            ax.set_title(f'{title}\nμ={np.mean(values):.3f}, σ={np.std(values):.3f}', fontsize=10)
+            if base_values:
+                all_vals = values + base_values
+                bin_edges = np.histogram_bin_edges(all_vals, bins=25)
+                ax.hist(values, bins=bin_edges, edgecolor='black', alpha=0.6, color='steelblue', label='Diffusion')
+                ax.hist(base_values, bins=bin_edges, edgecolor='black', alpha=0.4, color='coral', label='Baseline')
+                ax.axvline(np.mean(values), color='blue', linestyle='--', linewidth=1.5)
+                ax.axvline(np.mean(base_values), color='red', linestyle='--', linewidth=1.5)
+                ax.set_title(f'{title}\nDiff: μ={np.mean(values):.3f} | Base: μ={np.mean(base_values):.3f}', fontsize=9)
+                ax.legend(fontsize=7)
+            else:
+                ax.hist(values, bins=25, edgecolor='black', alpha=0.7, color='steelblue')
+                ax.axvline(np.mean(values), color='red', linestyle='--', linewidth=1.5)
+                ax.set_title(f'{title}\nμ={np.mean(values):.3f}, σ={np.std(values):.3f}', fontsize=10)
             ax.set_xlabel(ylabel, fontsize=9)
         ax.grid(True, alpha=0.3)
 
@@ -221,6 +266,8 @@ def plot_histograms_summary(all_metrics, n_samples, save_path):
 
 def plot_selected_rir_samples(selected_samples, metric_name, sr, model_name, n_timesteps_inference, n_timesteps_train, save_dir):
     """Plot all selected RIR pairs on a single image with separate waveforms, EDC, and metrics.
+
+    If samples contain 'baseline' data, adds baseline traces to overlay/EDC and baseline metrics to text.
 
     Args:
         selected_samples: Dict of all selected samples (output from select_representative_samples)
@@ -241,8 +288,12 @@ def plot_selected_rir_samples(selected_samples, metric_name, sr, model_name, n_t
     n_samples_per_category = len(samples_dict['best'])
     n_total_rows = len(quality_order) * n_samples_per_category
 
-    # Each row: waveform_real, waveform_gen, normalized_overlay, EDC, text (metrics + conditions combined)
-    fig, axes = plt.subplots(n_total_rows, 5, figsize=(24, 3.0 * n_total_rows))
+    # Check if baseline data exists
+    has_baseline = 'baseline' in samples_dict['best'][0]['sample']
+
+    # Columns: real, generated, [baseline if exists], normalized_overlay, EDC, text
+    n_cols = 6 if has_baseline else 5
+    fig, axes = plt.subplots(n_total_rows, n_cols, figsize=(4.8 * n_cols, 3.0 * n_total_rows))
 
     # Main title with metric name
     metric_display = metric_name.upper() if metric_name in ['lsd', 'edc', 'drr'] else metric_name.capitalize()
@@ -261,6 +312,8 @@ def plot_selected_rir_samples(selected_samples, metric_name, sr, model_name, n_t
             rir_ref = pair['reference']
             condition = pair['condition']
             metrics = pair['metrics']
+            rir_base = pair.get('baseline')
+            baseline_metrics = pair.get('baseline_metrics')
 
             # Extract condition info
             room_dims = condition[:3]
@@ -276,61 +329,86 @@ def plot_selected_rir_samples(selected_samples, metric_name, sr, model_name, n_t
             t_ref = np.arange(len(rir_ref)) / sr * 1000
             t_gen = np.arange(len(rir_gen)) / sr * 1000
             max_time = max(t_ref[-1], t_gen[-1])
+            if rir_base is not None:
+                t_base = np.arange(len(rir_base)) / sr * 1000
+                max_time = max(max_time, t_base[-1])
 
-            # --- Column 0: Real Waveform ---
-            axes[row_idx, 0].plot(t_ref, rir_ref, color='green', linewidth=0.8)
-            axes[row_idx, 0].set_ylabel('Amplitude', fontsize=9)
-            axes[row_idx, 0].set_title(f'{row_title} - Real', fontsize=10, fontweight='bold', loc='left')
-            axes[row_idx, 0].grid(True, alpha=0.3)
-            axes[row_idx, 0].set_xlim([0, max_time])
+            # Column index tracker (shifts when baseline column is present)
+            col = 0
+
+            # --- Real Waveform ---
+            axes[row_idx, col].plot(t_ref, rir_ref, color='green', linewidth=0.8)
+            axes[row_idx, col].set_ylabel('Amplitude', fontsize=9)
+            axes[row_idx, col].set_title(f'{row_title} - Real', fontsize=10, fontweight='bold', loc='left')
+            axes[row_idx, col].grid(True, alpha=0.3)
+            axes[row_idx, col].set_xlim([0, max_time])
             if row_idx == n_total_rows - 1:
-                axes[row_idx, 0].set_xlabel('Time (ms)', fontsize=9)
+                axes[row_idx, col].set_xlabel('Time (ms)', fontsize=9)
+            col += 1
 
-            # --- Column 1: Generated Waveform ---
-            axes[row_idx, 1].plot(t_gen, rir_gen, color='blue', linewidth=0.8)
-            axes[row_idx, 1].set_ylabel('Amplitude', fontsize=9)
-            axes[row_idx, 1].set_title('Generated', fontsize=10, fontweight='bold', loc='left')
-            axes[row_idx, 1].grid(True, alpha=0.3)
-            axes[row_idx, 1].set_xlim([0, max_time])
+            # --- Generated Waveform ---
+            axes[row_idx, col].plot(t_gen, rir_gen, color='blue', linewidth=0.8)
+            axes[row_idx, col].set_ylabel('Amplitude', fontsize=9)
+            axes[row_idx, col].set_title('Generated', fontsize=10, fontweight='bold', loc='left')
+            axes[row_idx, col].grid(True, alpha=0.3)
+            axes[row_idx, col].set_xlim([0, max_time])
             if row_idx == n_total_rows - 1:
-                axes[row_idx, 1].set_xlabel('Time (ms)', fontsize=9)
+                axes[row_idx, col].set_xlabel('Time (ms)', fontsize=9)
+            col += 1
 
-            # --- Column 2: L2 Normalized Overlay ---
-            # L2 normalize both RIRs
+            # --- Baseline Waveform (only if baseline exists) ---
+            if has_baseline:
+                if rir_base is not None:
+                    axes[row_idx, col].plot(t_base, rir_base, color='coral', linewidth=0.8)
+                axes[row_idx, col].set_ylabel('Amplitude', fontsize=9)
+                axes[row_idx, col].set_title('Baseline', fontsize=10, fontweight='bold', loc='left')
+                axes[row_idx, col].grid(True, alpha=0.3)
+                axes[row_idx, col].set_xlim([0, max_time])
+                if row_idx == n_total_rows - 1:
+                    axes[row_idx, col].set_xlabel('Time (ms)', fontsize=9)
+                col += 1
+
+            # --- L2 Normalized Overlay (Real + Generated only) ---
             rir_ref_norm = rir_ref / (np.linalg.norm(rir_ref) + 1e-10)
             rir_gen_norm = rir_gen / (np.linalg.norm(rir_gen) + 1e-10)
-            axes[row_idx, 2].plot(t_ref, rir_ref_norm, color='green', linewidth=0.8, label='Real', alpha=0.7)
-            axes[row_idx, 2].plot(t_gen, rir_gen_norm, color='blue', linewidth=0.8, label='Generated', alpha=0.7)
-            axes[row_idx, 2].set_ylabel('Normalized Amp.', fontsize=9)
-            axes[row_idx, 2].set_title('L2 Normalized Overlay', fontsize=10, fontweight='bold', loc='left')
-            axes[row_idx, 2].legend(loc='upper right', fontsize=8)
-            axes[row_idx, 2].grid(True, alpha=0.3)
-            axes[row_idx, 2].set_xlim([0, max_time])
+            axes[row_idx, col].plot(t_ref, rir_ref_norm, color='green', linewidth=0.8, label='Real', alpha=0.7)
+            axes[row_idx, col].plot(t_gen, rir_gen_norm, color='blue', linewidth=0.8, label='Generated', alpha=0.7)
+            axes[row_idx, col].set_ylabel('Normalized Amp.', fontsize=9)
+            axes[row_idx, col].set_title('L2 Normalized Overlay', fontsize=10, fontweight='bold', loc='left')
+            axes[row_idx, col].legend(loc='upper right', fontsize=7)
+            axes[row_idx, col].grid(True, alpha=0.3)
+            axes[row_idx, col].set_xlim([0, max_time])
             if row_idx == n_total_rows - 1:
-                axes[row_idx, 2].set_xlabel('Time (ms)', fontsize=9)
+                axes[row_idx, col].set_xlabel('Time (ms)', fontsize=9)
+            col += 1
 
-            # --- Column 3: EDC ---
+            # --- EDC ---
             edc_gen = compute_edc(rir_gen)
             edc_ref = compute_edc(rir_ref)
             t_edc = np.arange(len(edc_gen)) / sr * 1000
-            axes[row_idx, 3].plot(t_edc, edc_ref, label='Real', color='green', linewidth=1.2)
-            axes[row_idx, 3].plot(t_edc, edc_gen, label='Generated', color='blue', linewidth=1.2, linestyle='--')
-            axes[row_idx, 3].axhline(y=-40, color='yellow', linestyle=':', alpha=0.8, linewidth=1.2)
-            axes[row_idx, 3].set_ylabel('Energy (dB)', fontsize=9)
-            axes[row_idx, 3].set_title('Energy Decay Curve', fontsize=10)
-            axes[row_idx, 3].legend(loc='upper right', fontsize=8)
-            axes[row_idx, 3].grid(True, alpha=0.3)
-            axes[row_idx, 3].set_ylim([-80, 5])
+            axes[row_idx, col].plot(t_edc, edc_ref, label='Real', color='green', linewidth=1.2)
+            axes[row_idx, col].plot(t_edc, edc_gen, label='Generated', color='blue', linewidth=1.2, linestyle='--')
+            if rir_base is not None:
+                edc_base = compute_edc(rir_base)
+                t_edc_base = np.arange(len(edc_base)) / sr * 1000
+                axes[row_idx, col].plot(t_edc_base, edc_base, label='Baseline', color='coral', linewidth=1.2, linestyle=':')
+            axes[row_idx, col].axhline(y=-40, color='yellow', linestyle=':', alpha=0.8, linewidth=1.2)
+            axes[row_idx, col].set_ylabel('Energy (dB)', fontsize=9)
+            axes[row_idx, col].set_title('Energy Decay Curve', fontsize=10)
+            axes[row_idx, col].legend(loc='upper right', fontsize=7)
+            axes[row_idx, col].grid(True, alpha=0.3)
+            axes[row_idx, col].set_ylim([-80, 5])
             if row_idx == n_total_rows - 1:
-                axes[row_idx, 3].set_xlabel('Time (ms)', fontsize=9)
+                axes[row_idx, col].set_xlabel('Time (ms)', fontsize=9)
+            col += 1
 
-            # --- Column 4: Metrics + Conditions Text ---
-            axes[row_idx, 4].axis('off')
+            # --- Metrics + Conditions Text ---
+            axes[row_idx, col].axis('off')
 
             # Metrics text
             m = metrics
             metrics_text = (
-                f"METRICS:\n"
+                f"DIFFUSION METRICS:\n"
                 f"  T60 Error: {m['t60']['broadband']:.3f} s\n"
                 f"  EDT Error: {m['edt']['error']:.3f} s\n"
                 f"  DRR Error: {m['drr']['error']:.2f} dB\n"
@@ -340,6 +418,17 @@ def plot_selected_rir_samples(selected_samples, metric_name, sr, model_name, n_t
                 f"  EDC Dist: {m['edc_distance']['broadband']:.3f}\n"
                 f"  Cosine Sim: {m['cosine_similarity']:.4f}\n"
             )
+
+            if baseline_metrics is not None:
+                bm = baseline_metrics
+                metrics_text += (
+                    f"\nBASELINE METRICS:\n"
+                    f"  T60 Error: {bm['t60']['broadband']:.3f} s\n"
+                    f"  EDT Error: {bm['edt']['error']:.3f} s\n"
+                    f"  DRR Error: {bm['drr']['error']:.2f} dB\n"
+                    f"  LSD: {bm['lsd']['broadband']:.2f} dB\n"
+                    f"  Cosine Sim: {bm['cosine_similarity']:.4f}\n"
+                )
 
             # Conditions text
             conditions_text = (
@@ -352,8 +441,8 @@ def plot_selected_rir_samples(selected_samples, metric_name, sr, model_name, n_t
             )
 
             full_text = metrics_text + conditions_text
-            axes[row_idx, 4].text(0.05, 0.5, full_text, transform=axes[row_idx, 4].transAxes,
-                           fontsize=9, verticalalignment='center', fontfamily='monospace',
+            axes[row_idx, col].text(0.05, 0.5, full_text, transform=axes[row_idx, col].transAxes,
+                           fontsize=8, verticalalignment='center', fontfamily='monospace',
                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
 
             row_idx += 1

@@ -242,7 +242,10 @@ def create_edc_plots_mode2(real_rirs_wave: list, generated_rirs_wave: list,
             left_ax.text(-0.05, 1.25, row_title, transform=left_ax.transAxes, 
                         fontsize=11, fontweight='bold', ha='left', va='bottom')
             
-    # plt.tight_layout()
+    # Add legend (a single shared legend for the whole figure)
+    handles, labels = axes[0, 0].get_legend_handles_labels() if n_octaves > 1 else axes[0].get_legend_handles_labels()
+    fig.legend(handles[:2], ['Real', 'Generated'], loc='upper right', fontsize=12, framealpha=0.9, bbox_to_anchor=(0.99, 0.99))
+
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.subplots_adjust(wspace=0.3, hspace=0.6)
 

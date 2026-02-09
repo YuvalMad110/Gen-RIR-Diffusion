@@ -19,8 +19,84 @@ def format_metric_line(name, stats, unit):
     return f"  {name:20s}: {stats['mean']:8.4f} ± {stats['std']:.4f} {unit}  (median: {stats['median']:.4f}, n_valid={stats['n_valid']})"
 
 
+def _format_comparison_table(aggregate, baseline_aggregate, diff_all_metrics, baseline_all_metrics):
+    """Format a three-column comparison table: Diffusion | Baseline | Baseline-Diff.
+
+    Args:
+        aggregate: Aggregated diffusion metrics
+        baseline_aggregate: Aggregated baseline metrics
+        diff_all_metrics: Per-sample diffusion metrics list
+        baseline_all_metrics: Per-sample baseline metrics list
+
+    Returns:
+        List of formatted lines
+    """
+    lines = []
+
+    # Define metrics to compare, with extractors for per-sample absolute values
+    # For error metrics: lower = better. For cosine_similarity: higher = better.
+    metrics_table = [
+        ('T60 Abs Error',    't60_abs_error',   's',  lambda m: abs(m['t60']['broadband']) if m['t60']['broadband'] is not None and not np.isnan(m['t60']['broadband']) else np.nan),
+        ('T60 Perc Error',   't60_perc_error',  '%',  lambda m: m['t60']['perc']),
+        ('EDT Error',        'edt_error',       's',  lambda m: abs(m['edt']['error']) if m['edt']['error'] is not None and not np.isnan(m['edt']['error']) else np.nan),
+        ('DRR Abs Error',    'drr_abs_error',   'dB', lambda m: abs(m['drr']['error']) if m['drr']['error'] is not None and not np.isnan(m['drr']['error']) else np.nan),
+        ('C50 Error',        'c50_error',       'dB', lambda m: abs(m['c50']['error']) if m['c50']['error'] is not None and not np.isnan(m['c50']['error']) else np.nan),
+        ('C80 Error',        'c80_error',       'dB', lambda m: abs(m['c80']['error']) if m['c80']['error'] is not None and not np.isnan(m['c80']['error']) else np.nan),
+        ('LSD (broadband)',  'lsd',             'dB', lambda m: m['lsd']['broadband']),
+        ('EDC Distance',     'edc_distance',    'dB²',lambda m: m['edc_distance']['broadband']),
+        ('Cosine Similarity','cosine_similarity','',   lambda m: m['cosine_similarity']),
+    ]
+
+    # Header
+    col_w = 22  # column width for values
+    hdr = f"  {'Metric':20s} | {'Diffusion':>{col_w}s} | {'Baseline':>{col_w}s} | {'Base - Diff':>{col_w}s}"
+    lines.append(hdr)
+    lines.append("  " + "-" * (len(hdr) - 2))
+
+    for name, agg_key, unit, extractor in metrics_table:
+        # Diffusion column
+        diff_stats = aggregate.get(agg_key, {})
+        diff_val = diff_stats.get('mean', np.nan)
+
+        # Baseline column
+        base_stats = baseline_aggregate.get(agg_key, {})
+        base_val = base_stats.get('mean', np.nan)
+
+        # Compute per-sample Baseline - Diffusion difference
+        paired_diffs = []
+        for dm, bm in zip(diff_all_metrics, baseline_all_metrics):
+            dv = extractor(dm)
+            bv = extractor(bm)
+            if dv is not None and bv is not None and not np.isnan(dv) and not np.isnan(bv):
+                paired_diffs.append(bv - dv)
+
+        if paired_diffs:
+            delta_mean = np.mean(paired_diffs)
+            delta_str = f"{delta_mean:+.4f} {unit}"
+        else:
+            delta_str = "N/A"
+
+        # Format columns
+        def _fmt(val, std):
+            if val is None or np.isnan(val):
+                return "N/A".rjust(col_w)
+            s = f"{val:.4f}"
+            if std is not None and not np.isnan(std):
+                s += f" ± {std:.4f}"
+            return s.rjust(col_w)
+
+        diff_str = _fmt(diff_val, diff_stats.get('std', np.nan))
+        base_str = _fmt(base_val, base_stats.get('std', np.nan))
+
+        lines.append(f"  {name:20s} | {diff_str} | {base_str} | {delta_str:>{col_w}s}")
+
+    return lines
+
+
 def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_train_steps, save_path,
-                            title="RIR DIFFUSION MODEL - EVALUATION SUMMARY"):
+                            title="RIR DIFFUSION MODEL - EVALUATION SUMMARY",
+                            baseline_aggregate=None, baseline_all_metrics=None, baseline_method=None,
+                            all_metrics=None):
     """Save evaluation summary to a text file.
 
     Args:
@@ -32,15 +108,21 @@ def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_t
         n_train_steps: Number of training timesteps
         save_path: Path to save the summary
         title: Title for the summary (default: real RIR evaluation)
+        baseline_aggregate: Aggregated baseline metrics (optional)
+        baseline_all_metrics: Per-sample baseline metrics list (optional, for paired comparison)
+        baseline_method: Baseline method name (optional)
+        all_metrics: Per-sample diffusion metrics list (needed for paired comparison table)
     """
+    diff_all_metrics = all_metrics
+
     lines = [
         "=" * 70, title, "=" * 70,
         f"Timestamp: {get_israel_time('%Y-%m-%d %H:%M:%S')}",
         f"Total samples evaluated: {n_samples}",
-        "", "-" * 70, "ACOUSTIC METRICS (Mean ± Std)", "-" * 70,
+        "", "-" * 70, "ACOUSTIC METRICS — Diffusion (Mean ± Std)", "-" * 70,
     ]
 
-    # Metrics
+    # Diffusion metrics
     metrics_table = [
         ('T60 Error', 't60_error', 's'), ('T60 Abs Error', 't60_abs_error', 's'), ('T60 Perc Error', 't60_perc_error', '%'),
         ('EDT Error', 'edt_error', 's'), ('DRR Error', 'drr_error', 'dB'),
@@ -51,6 +133,28 @@ def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_t
     for name, key, unit in metrics_table:
         if key in aggregate:
             lines.append(format_metric_line(name, aggregate[key], unit))
+
+    # Baseline section (if enabled)
+    if baseline_aggregate is not None:
+        baseline_label = 'pyroomacoustics' if baseline_method == 'pra' else 'RIR-Generator (Habets)'
+        lines.extend([
+            "", "-" * 70, f"ACOUSTIC METRICS — Baseline: {baseline_label} (Mean ± Std)", "-" * 70,
+        ])
+        for name, key, unit in metrics_table:
+            if key in baseline_aggregate:
+                lines.append(format_metric_line(name, baseline_aggregate[key], unit))
+
+        # Comparison table
+        if baseline_all_metrics is not None and diff_all_metrics is not None:
+            lines.extend([
+                "", "-" * 70,
+                "COMPARISON TABLE (Baseline - Diffusion, per-sample paired)",
+                "  NOTE: For error metrics (lower=better), negative means diffusion did WORSE.",
+                "        For Cosine Similarity (higher=better), negative means diffusion did WORSE.",
+                "-" * 70,
+            ])
+            lines.extend(_format_comparison_table(aggregate, baseline_aggregate, diff_all_metrics, baseline_all_metrics))
+
     print("\n".join(lines))
 
     # Configuration and data info
@@ -67,6 +171,8 @@ def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_t
         f"Octave bands: {getattr(args, 'octave_bands', None)}",
         f"Num workers: {getattr(args, 'workers', None)}",
     ])
+    if baseline_method:
+        lines.append(f"Baseline method: {baseline_method}")
 
     lines.extend([
         "", "-" * 70, "DATA INFO (from training)", "-" * 70,

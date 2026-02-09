@@ -37,6 +37,7 @@ from utils.visualization import (
     plot_all_histograms, plot_histograms_summary,
     plot_selected_rir_samples, plot_edc_per_band_for_selected
 )
+from utils.synthetic_rir import generate_synthetic_rirs_batch
 
 
 # =============================================================================
@@ -44,10 +45,19 @@ from utils.visualization import (
 # =============================================================================
 
 def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signal=None):
-    """Run evaluation over the entire test set."""
+    """Run evaluation over the entire test set.
+
+    Returns:
+        aggregate: Aggregated diffusion metrics
+        all_metrics: List of per-sample diffusion metrics
+        sample_pairs: List of sample dicts (generated, reference, condition, metrics, and optionally baseline)
+        baseline_aggregate: Aggregated baseline metrics (None if baseline disabled)
+        baseline_all_metrics: List of per-sample baseline metrics (None if baseline disabled)
+    """
     model.eval()
 
     all_metrics = []
+    baseline_all_metrics = [] if args.baseline_method != 'none' else None
     sample_pairs = []
 
     sr = data_info['sr_target']
@@ -57,6 +67,7 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signa
     num_inference_steps = args.num_inference_steps
     octave_bands = args.octave_bands
     scale_rir = data_info.get('scale_rir', False)
+    use_baseline = args.baseline_method != 'none'
 
     # Print evaluation configuration
     print(f"\nEvaluating on test set ({len(test_dataloader)} batches)...")
@@ -64,8 +75,9 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signa
     print(f"Scheduler: {'DDIM' if args.use_ddim else 'DDPM'}")
     print(f"Inference steps: {num_inference_steps}")
     print(f"Octave bands: {octave_bands}")
-
-    n_samples_saved = 0
+    if use_baseline:
+        baseline_label = 'pyroomacoustics' if args.baseline_method == 'pra' else 'RIR-Generator (Habets)'
+        print(f"Baseline: {baseline_label}")
 
     with torch.no_grad():
         for batch in tqdm(test_dataloader, desc="Evaluating batches"):
@@ -83,8 +95,15 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signa
             # Build condition tensor [B, 10]: room_dim(3) + mic_loc(3) + speaker_loc(3) + rt60(1)
             conditions = torch.cat([room_dims, mic_locs, speaker_locs, rt60s.unsqueeze(1)], dim=1).float()
             conditions = conditions.to(device)
+            conditions_np = conditions.cpu().numpy()
 
-            # Generate RIRs
+            # --- Generate baseline RIRs (synthetic) ---
+            baseline_waveforms = None
+            if use_baseline:
+                baseline_waveforms = generate_synthetic_rirs_batch(
+                    conditions_np, sr, max_length_samples=None, method=args.baseline_method, verbose=False )
+
+            # --- Generate diffusion RIRs ---
             channels = 2  # Real + Imag for spectrogram
             shape = (batch_size, channels, *sample_size)
 
@@ -124,17 +143,27 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signa
                 metrics = evaluate_rir_pair(rir_gen, rir_ref, sr, octave_bands, dry_signal=dry_signal)
                 all_metrics.append(metrics)
 
-                # Store all samples for later selection
-                sample_pairs.append({
+                sample_dict = {
                     'generated': rir_gen,
                     'reference': rir_ref,
-                    'condition': conditions[i].cpu().numpy(),
+                    'condition': conditions_np[i],
                     'metrics': metrics
-                })
+                }
+
+                # Baseline evaluation
+                if use_baseline:
+                    rir_base, rir_ref_base = align_rir_lengths(baseline_waveforms[i], real_waveforms[i], mode='truncate')
+                    baseline_metrics = evaluate_rir_pair(rir_base, rir_ref_base, sr, octave_bands, dry_signal=dry_signal)
+                    baseline_all_metrics.append(baseline_metrics)
+                    sample_dict['baseline'] = rir_base
+                    sample_dict['baseline_metrics'] = baseline_metrics
+
+                sample_pairs.append(sample_dict)
 
     aggregate = aggregate_metrics(all_metrics)
+    baseline_aggregate = aggregate_metrics(baseline_all_metrics) if use_baseline else None
 
-    return aggregate, all_metrics, sample_pairs
+    return aggregate, all_metrics, sample_pairs, baseline_aggregate, baseline_all_metrics
 
 
 # =============================================================================
@@ -148,7 +177,7 @@ def parse_args():
     parser.add_argument("--dataset_path", type=str, default='./datasets/GTU_rir/GTU_RIR.pickle.dat', help="Path to RIR dataset")
     parser.add_argument("--nSamples", type=int, default=None, help="Number of samples (None=use all from data_info)")
     parser.add_argument("--guidance_scale", type=float, default=2.0, help="CFG scale (1.0=no guidance)")
-    parser.add_argument("--num_inference_steps", type=int, default=None, help="Denoising steps (None=use training timesteps)")
+    parser.add_argument("--num_inference_steps", type=int, default=50, help="Denoising steps (None=use training timesteps)")
     parser.add_argument("--use_ddim", action="store_true", help="Use DDIM sampling")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for evaluation")
     parser.add_argument("--octave_bands", type=float, nargs='+', default=[125, 250, 500, 1000, 2000, 4000], help="Octave bands")
@@ -158,6 +187,8 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=4, help="DataLoader workers")
     parser.add_argument("--debug_mode", type=bool, default=False, help="Debug mode: fast run")
     parser.add_argument("--speech_path", type=str, default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/data/1195-130164-0010.wav', help="Path to clean speech for reverbed LSD computation")
+    parser.add_argument("--baseline_method", type=str, default='none', choices=['habets', 'pra', 'none'],
+                        help="Synthetic RIR baseline method: 'habets', 'pra', or 'none' (disabled)")
     return parser.parse_args()
 
 
@@ -232,7 +263,10 @@ def main():
     )
 
     # ---------- Run evaluation ----------
-    aggregate, all_metrics, all_samples = evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signal)
+    aggregate, all_metrics, all_samples, baseline_aggregate, baseline_all_metrics = evaluate_test_set(
+        model, test_dataloader, device, data_info, args, dry_signal
+    )
+    use_baseline = args.baseline_method != 'none'
 
     # Select representative samples based on hardcoded metrics
     print("\nSelecting representative samples...")
@@ -241,23 +275,31 @@ def main():
 
     # ---------- Reporting and Visualization ----------
     # Print and save results
-    save_evaluation_summary(aggregate, len(all_metrics), data_info, args, len(test_dataset), model.n_timesteps, save_path / 'evaluation_summary.txt')
+    save_evaluation_summary(
+        aggregate, len(all_metrics), data_info, args, len(test_dataset), model.n_timesteps,
+        save_path / 'evaluation_summary.txt',
+        baseline_aggregate=baseline_aggregate,
+        baseline_all_metrics=baseline_all_metrics if use_baseline else None,
+        baseline_method=args.baseline_method if use_baseline else None,
+        all_metrics=all_metrics if use_baseline else None,
+    )
     save_detailed_metrics_table(all_metrics, all_samples, save_path / 'detailed_metrics.csv')
     save_selected_samples(selected_samples, data_info, save_path)
 
     # Generate plots
     print("\nGenerating visualizations...")
-    plot_histograms_summary(all_metrics, len(all_metrics), save_path / 'histograms_summary.png')
-    plot_all_histograms(all_metrics, save_path / 'histograms')
+    plot_histograms_summary(
+        all_metrics, len(all_metrics), save_path / 'histograms_summary.png',
+        baseline_all_metrics=baseline_all_metrics,
+    )
+    plot_all_histograms(all_metrics, save_path / 'histograms', baseline_all_metrics=baseline_all_metrics)
 
     # Plot selected representative samples (4 per metric)
-    # Extract model name from model path (parent folder name)
     model_name = Path(args.model_path).parent.name
     for metric_name in selected_samples.keys():
         plot_selected_rir_samples(selected_samples, metric_name, data_info['sr_target'],
                                   model_name, args.num_inference_steps, model.n_timesteps, save_path)
 
-        # Plot EDC per band comparison for selected samples
         plot_edc_per_band_for_selected(selected_samples, metric_name, data_info['sr_target'],
                                         args.octave_bands, save_path)
 
