@@ -653,7 +653,12 @@ def edc_distance_octave_bands(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
 # Comprehensive Evaluation
 # =============================================================================
 
-def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int, center_freqs: List[float] = None, dry_signal: np.ndarray = None) -> Dict:
+ALL_METRICS = ['t60', 'edt', 'drr', 'c50', 'c80', 'lsd', 'edc_distance', 'cosine_similarity']
+
+
+def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
+                      center_freqs: List[float] = None, dry_signal: np.ndarray = None,
+                      metrics: List[str] = None) -> Dict:
     """
     Comprehensive evaluation of a generated RIR against reference.
 
@@ -663,42 +668,39 @@ def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int, center_
         sr: Sample rate
         center_freqs: Octave band center frequencies
         dry_signal: Optional dry signal to convolve with RIRs for reverbed LSD
+        metrics: List of metric keys to compute (default: all). Options: t60, edt, drr, c50, c80, lsd, edc_distance, cosine_similarity
 
     Returns:
-        Dictionary containing all metrics
+        Dictionary containing requested metrics
     """
     if center_freqs is None:
         center_freqs = [125, 250, 500, 1000, 2000, 4000]
+    if metrics is None:
+        metrics = ALL_METRICS
 
-    results = {
-        # T60
-        't60': t60_error(rir_gen, rir_ref, sr, center_freqs),
-
-        # EDT
-        'edt': edt_error(rir_gen, rir_ref, sr),
-
-        # DRR
-        'drr': drr_error(rir_gen, rir_ref, sr),
-
-        # Clarity
-        'c50': clarity_error(rir_gen, rir_ref, sr, time_ms=50),
-        'c80': clarity_error(rir_gen, rir_ref, sr, time_ms=80),
-
-        # Spectral (reverbed LSD if dry_signal provided)
-        'lsd': {
+    results = {}
+    if 't60' in metrics:
+        results['t60'] = t60_error(rir_gen, rir_ref, sr, center_freqs)
+    if 'edt' in metrics:
+        results['edt'] = edt_error(rir_gen, rir_ref, sr)
+    if 'drr' in metrics:
+        results['drr'] = drr_error(rir_gen, rir_ref, sr)
+    if 'c50' in metrics:
+        results['c50'] = clarity_error(rir_gen, rir_ref, sr, time_ms=50)
+    if 'c80' in metrics:
+        results['c80'] = clarity_error(rir_gen, rir_ref, sr, time_ms=80)
+    if 'lsd' in metrics:
+        results['lsd'] = {
             'broadband': compute_lsd(rir_gen, rir_ref, dry_signal=dry_signal),
             'per_band': compute_lsd_octave_bands(rir_gen, rir_ref, sr, center_freqs, dry_signal=dry_signal)
-        },
-
-        # EDC
-        'edc_distance': {
+        }
+    if 'edc_distance' in metrics:
+        results['edc_distance'] = {
             'broadband': edc_distance(rir_gen, rir_ref, sr),
             'per_band': edc_distance_octave_bands(rir_gen, rir_ref, sr, center_freqs)
-        },
-
-        # Cosine Similarity
-        'cosine_similarity': compute_cosine_similarity(rir_gen, rir_ref)
-    }
+        }
+    if 'cosine_similarity' in metrics:
+        results['cosine_similarity'] = compute_cosine_similarity(rir_gen, rir_ref)
 
     return results
 
@@ -757,36 +759,37 @@ def aggregate_metrics(results: List[Dict]) -> Dict:
         }
     
     aggregate = {}
-    
-    # T60
-    t60_errors = [r['t60']['broadband'] for r in results]
-    t60_abs_errors = [abs(e) for e in t60_errors if e is not None and not np.isnan(e)]
-    t60_perc_errors = [r['t60']['perc'] for r in results]
-    aggregate['t60_error'] = safe_stats(t60_errors)
-    aggregate['t60_abs_error'] = safe_stats(t60_abs_errors)
-    aggregate['t60_perc_error'] = safe_stats(t60_perc_errors)
-    aggregate['t60_mean_band_abs_error'] = safe_stats([r['t60']['mean_band_abs_error'] for r in results])
-    
-    # EDT
-    aggregate['edt_error'] = safe_stats([r['edt']['error'] for r in results])
-    
-    # DRR
-    aggregate['drr_error'] = safe_stats([r['drr']['error'] for r in results])
-    aggregate['drr_abs_error'] = safe_stats([abs(r['drr']['error']) for r in results 
-                                              if r['drr']['error'] is not None and not np.isnan(r['drr']['error'])])
-    
-    # Clarity
-    aggregate['c50_error'] = safe_stats([r['c50']['error'] for r in results])
-    aggregate['c80_error'] = safe_stats([r['c80']['error'] for r in results])
-    
-    # LSD
-    aggregate['lsd'] = safe_stats([r['lsd']['broadband'] for r in results])
+    has = lambda key: results and key in results[0]
 
-    # EDC distance
-    aggregate['edc_distance'] = safe_stats([r['edc_distance']['broadband'] for r in results])
+    if has('t60'):
+        t60_errors = [r['t60']['broadband'] for r in results]
+        t60_abs_errors = [abs(e) for e in t60_errors if e is not None and not np.isnan(e)]
+        aggregate['t60_error'] = safe_stats(t60_errors)
+        aggregate['t60_abs_error'] = safe_stats(t60_abs_errors)
+        aggregate['t60_perc_error'] = safe_stats([r['t60']['perc'] for r in results])
+        aggregate['t60_mean_band_abs_error'] = safe_stats([r['t60']['mean_band_abs_error'] for r in results])
 
-    # Cosine Similarity
-    aggregate['cosine_similarity'] = safe_stats([r['cosine_similarity'] for r in results])
+    if has('edt'):
+        aggregate['edt_error'] = safe_stats([r['edt']['error'] for r in results])
+
+    if has('drr'):
+        aggregate['drr_error'] = safe_stats([r['drr']['error'] for r in results])
+        aggregate['drr_abs_error'] = safe_stats([abs(r['drr']['error']) for r in results
+                                                  if r['drr']['error'] is not None and not np.isnan(r['drr']['error'])])
+
+    if has('c50'):
+        aggregate['c50_error'] = safe_stats([r['c50']['error'] for r in results])
+    if has('c80'):
+        aggregate['c80_error'] = safe_stats([r['c80']['error'] for r in results])
+
+    if has('lsd'):
+        aggregate['lsd'] = safe_stats([r['lsd']['broadband'] for r in results])
+
+    if has('edc_distance'):
+        aggregate['edc_distance'] = safe_stats([r['edc_distance']['broadband'] for r in results])
+
+    if has('cosine_similarity'):
+        aggregate['cosine_similarity'] = safe_stats([r['cosine_similarity'] for r in results])
 
     return aggregate
 

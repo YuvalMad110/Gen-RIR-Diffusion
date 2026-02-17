@@ -187,7 +187,7 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=4, help="DataLoader workers")
     parser.add_argument("--debug_mode", type=bool, default=False, help="Debug mode: fast run")
     parser.add_argument("--speech_path", type=str, default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/data/1195-130164-0010.wav', help="Path to clean speech for reverbed LSD computation")
-    parser.add_argument("--baseline_method", type=str, default='none', choices=['habets', 'pra', 'none'],
+    parser.add_argument("--baseline_method", type=str, default='habets', choices=['habets', 'pra', 'none'],
                         help="Synthetic RIR baseline method: 'habets', 'pra', or 'none' (disabled)")
     return parser.parse_args()
 
