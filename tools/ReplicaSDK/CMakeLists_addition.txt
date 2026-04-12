@@ -1,0 +1,13 @@
+# ── Append this block to ReplicaSDK/CMakeLists.txt ──────────────────────────
+# (the setup_replica_renderer.sh script does this automatically)
+
+add_executable(ReplicaPoseRenderer src/replica_pose_renderer.cpp src/MirrorSurface.cpp)
+
+target_link_libraries(ReplicaPoseRenderer
+                      ${Pangolin_LIBRARIES}
+                      ${dl_LIBRARIES}
+                      GL
+                      GLEW
+                      ptex
+                      stdc++fs
+)
