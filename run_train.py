@@ -105,7 +105,7 @@ def get_datasets_folder():
          return os.path.normpath('./datasets/GTU_rir/GTU_RIR.pickle.dat')
 
 def gather_data_info(args, train_dataloader):
-    sample_size = get_sample_size(train_dataloader)
+    sample_size = get_sample_size(train_dataloader, args.n_fft, args.hop_length)
     data_info = {"n_fft": args.n_fft,
                  "hop_length": args.hop_length, 
                  "use_spectrogram": True, 
@@ -124,10 +124,19 @@ def gather_data_info(args, train_dataloader):
                  }
     return data_info   
 
-def get_sample_size(dataloader):
+def get_sample_size(dataloader, n_fft, hop_length):
+    """Get the sample size that the UNet will operate on (spectrogram dimensions).
+    If the dataloader returns spectrograms [B, C, F, T], use those directly.
+    If it returns raw waveforms [B, T], compute the spectrogram dimensions from n_fft/hop_length.
+    """
     for batch in dataloader:
         rir = batch[0]
-        return rir.shape[2:] if rir.ndim >= 3 else rir.shape[1:]
+        if rir.ndim >= 3:
+            return rir.shape[2:]
+        # Raw waveforms [B, T] — compute spectrogram size
+        n_freq = n_fft // 2 + 1
+        n_frames = rir.shape[-1] // hop_length + 1
+        return torch.Size([n_freq, n_frames])
 
 # ------------------------- Main --------------------------
 def main():
