@@ -1,7 +1,24 @@
-# YM
+# ── Project outputs & logs ────────────────────────────────────────────────────
 outputs/
-data/data_analysis/
+
+# ── Generated data files (reproducible via prep scripts) ─────────────────────
+data/soundspaces_replica_mapping.csv
+data/room_geometry.csv
+data/poses/
+
+# ── Scratch / sandbox scripts ─────────────────────────────────────────────────
+fix_sample_size.py
+generate_metrics_doc.py
+temp_per_metric_vis.py
+
+# ── Large binary / media files ────────────────────────────────────────────────
 *.wav
+*.jpg
+*.png
+*.docx
+
+# ── Dev / analysis folders ────────────────────────────────────────────────────
+data/data_analysis/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

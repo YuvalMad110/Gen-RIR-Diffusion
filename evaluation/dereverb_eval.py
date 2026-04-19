@@ -30,11 +30,19 @@ A smaller improvement (Δ) on generated RIRs signals OOD behaviour.
 
 Usage
 -----
+    # nara_wpe (default, no external model required)
     python evaluation/dereverb_eval.py \
         --gtu_path         /home/yuvalmad/datasets/GTU_rir/GTU_RIR.pickle.dat \
         --librispeech_path /dsi/gannot-lab/gannot-lab1/datasets/LibriSpeech/LibriSpeech/Test \
         --diffusion_model_path Dec24_20-02-59_dsief07 \
-        --dereverb_model_dir   <path/to/mics1_...> \
+        --dereverb_model nara_wpe --wpe_taps 30 --wpe_iterations 15 \
+        --guidance_scale 2.5 --use_ddim
+
+    # unet (requires scene_agnostic_dereverberation on disk)
+    python evaluation/dereverb_eval.py \
+        --diffusion_model_path Dec24_20-02-59_dsief07 \
+        --dereverb_model unet \
+        --dereverb_model_dir <path/to/mics1_...> \
         --guidance_scale 2.5 --use_ddim
 
 Key arguments
@@ -45,10 +53,11 @@ diffusion_model_path
     (c) just the run folder name (e.g. Dec24_20-02-59_dsief07), which is
     expanded to <project>/outputs/finished/<name>/model_best.pth.tar.
 
-dereverb_model_dir
-    Directory of the trained dereverberation model.  Must contain settings.txt
-    and a checkpoints/ sub-folder with epoch*.pt files.
-    Example: .../scene_agnostic_dereverberation/trained_models/mics1_24.02.2026_17:27:55
+dereverb_model
+    Which dereverberation model to use as probe metric.
+    'unet'     : Scene-agnostic U-Net. Requires scene_agnostic_dereverberation
+                 project on disk and --dereverb_model_dir to be set.
+    'nara_wpe' : Blind WPE algorithm — no external project needed (default).
 """
 
 import argparse
@@ -63,7 +72,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import numpy as np
-import scipy.io
 import soundfile as sf
 import torch
 from scipy.signal import fftconvolve, resample_poly, correlate
@@ -73,19 +81,17 @@ from pystoi import stoi as compute_stoi
 
 
 # =============================================================================
-# Path setup — make both project roots importable
+# Path setup — make Gen-RIR-Diffusion importable
 # =============================================================================
 
 # This script lives at Gen-RIR-Diffusion/evaluation/dereverb_eval.py
-GEN_RIR_ROOT  = Path(__file__).parents[1]          # .../Gen-RIR-Diffusion/
-DEREVERB_ROOT = Path(__file__).parents[2] / "scene_agnostic_dereverberation"
+GEN_RIR_ROOT = Path(__file__).parents[1]   # .../Gen-RIR-Diffusion/
+EVAL_DIR     = Path(__file__).parent       # .../Gen-RIR-Diffusion/evaluation/
 
-# GEN_RIR_ROOT must be first so 'data' resolves to Gen-RIR-Diffusion/data/
-# (both projects have a top-level 'data/' package).
 if str(GEN_RIR_ROOT) not in sys.path:
     sys.path.insert(0, str(GEN_RIR_ROOT))
-if str(DEREVERB_ROOT) not in sys.path:
-    sys.path.append(str(DEREVERB_ROOT))
+if str(EVAL_DIR) not in sys.path:
+    sys.path.insert(1, str(EVAL_DIR))
 
 # --- Gen-RIR-Diffusion imports -----------------------------------------------
 from RIRDiffusionModel import RIRDiffusionModel
@@ -99,40 +105,8 @@ from utils.signal_proc import (
     estimate_decay_k_factor,
 )
 
-# --- scene_agnostic_dereverberation imports -----------------------------------
-# networks.model has no name collision with Gen-RIR-Diffusion.
-import networks.model as dereverb_arch
-
-# data.utils DOES collide with Gen-RIR-Diffusion's data package, so we load it
-# directly from the file system to bypass Python's package resolution.
-import importlib.util as _ilu
-_spec = _ilu.spec_from_file_location(
-    "dereverb_data_utils", str(DEREVERB_ROOT / "data" / "utils.py")
-)
-_dereverb_data_utils = _ilu.module_from_spec(_spec)
-_spec.loader.exec_module(_dereverb_data_utils)
-
-stft                = _dereverb_data_utils.stft
-istft               = _dereverb_data_utils.istft
-normalize_log_spec  = _dereverb_data_utils.normalize_log_spec
-denormalize_log_spec = _dereverb_data_utils.denormalize_log_spec
-normalize_mc        = _dereverb_data_utils.normalize_mc
-remove_module_str   = _dereverb_data_utils.remove_module_str
-
-# --- Load the synthesis window for ISTFT (stored next to the dereverb model) --
-_synt_win_mat = scipy.io.loadmat(str(DEREVERB_ROOT / "synt_win.mat"))
-SYNT_WIN = _synt_win_mat["synt_win"]
-
-
-# =============================================================================
-# Constants matching the dereverberation model's training setup
-# =============================================================================
-
-DEREVERB_SR  = 16_000   # sample rate the dereverberation model was trained on
-DEREVERB_K   = 512      # STFT window size (samples)
-DEREVERB_OVL = 0.75     # STFT overlap fraction
-FRAMES_NUM   = 256      # temporal segment length fed to the model
-EPS          = 2.2204 * np.exp(-16)
+# --- Dereverberation model interface -----------------------------------------
+from dereverberation_models import build_dereverb_model, DEREVERB_SR, DereverbModel
 
 
 # =============================================================================
@@ -156,56 +130,6 @@ def load_diffusion_model(model_path: str, device: torch.device):
     return model, data_info
 
 
-def load_dereverb_model(model_dir: str, device: torch.device):
-    """
-    Load the U-Net dereverberation model and its global normalization stats.
-
-    Reads settings.txt inside *model_dir* to discover the architecture
-    (ngf, unet_arch) and the path to the pre-computed global min/max pickle.
-    Then loads the latest epoch checkpoint.
-
-    Returns
-    -------
-    net   : trained dereverberation network in eval mode
-    stats : (log_max_clean, log_min_clean, log_max_reverb, log_min_reverb)
-    """
-    model_dir = Path(model_dir)
-    print(f"  Loading dereverberation model from:\n    {model_dir}")
-
-    # -- Parse key/value settings written by train.py -------------------------
-    settings = {}
-    with open(model_dir / "settings.txt") as f:
-        for line in f:
-            if ": " in line:
-                k, v = line.strip().split(": ", 1)
-                settings[k.strip()] = v.strip()
-
-    ngf = int(settings.get("ngf", 64))
-
-    # -- Resolve the global stats path ----------------------------------------
-    # train.py was run from /home/yuvalmad, so relative paths start with "./"
-    stats_path = Path(settings["global_stats_file"])
-    if not stats_path.is_absolute():
-        stats_path = Path.home() / str(stats_path).lstrip("./")
-    with open(stats_path, "rb") as f:
-        log_max_clean, log_min_clean, log_max_reverb, log_min_reverb = pickle.load(f)
-
-    # -- Instantiate vanilla U-Net (single microphone) ------------------------
-    net = dereverb_arch.UNet(ngf=ngf, nc=1, kernel_size=4).to(device)
-
-    checkpoints = sorted((model_dir / "checkpoints").glob("epoch*.pt"))
-    if not checkpoints:
-        raise FileNotFoundError(f"No checkpoint found in {model_dir / 'checkpoints'}")
-    ckpt_path = checkpoints[-1]
-
-    state_dict = torch.load(ckpt_path, map_location=device)
-    state_dict = remove_module_str(state_dict)
-    net.load_state_dict(state_dict)
-    net.eval()
-
-    print(f"  Checkpoint : {ckpt_path.name}  (ngf={ngf})")
-    stats = (log_max_clean, log_min_clean, log_max_reverb, log_min_reverb)
-    return net, stats
 
 
 # =============================================================================
@@ -237,79 +161,13 @@ def make_reverberant(clean: np.ndarray, rir: np.ndarray) -> np.ndarray:
     Convolve a clean speech signal with a RIR using the same approach as
     the dereverberation model's training pipeline:
       • full convolution, truncated to the original speech length
-      • RMS-normalised via normalize_mc
+      • RMS-normalised to target RMS = 0.1
     """
     reverb = fftconvolve(clean, rir, mode="full")[: len(clean)]
-    return normalize_mc(reverb.reshape(1, -1)).squeeze()
+    rms = np.sqrt(np.mean(reverb ** 2))
+    return reverb / (rms + 1e-8) * 0.1
 
 
-# =============================================================================
-# SECTION 3 — Dereverberation inference
-# =============================================================================
-
-def dereverberate(reverb_wav: np.ndarray, net, device: torch.device, stats) -> np.ndarray:
-    """
-    Run the dereverberation model on a single-channel 16-kHz waveform.
-
-    Pipeline:
-      1. Peak-normalise the input.
-      2. Compute log-magnitude STFT and normalise to [-1, 1].
-      3. Segment into non-overlapping 256-frame windows (plus one
-         overlapping tail segment to cover any residual frames).
-      4. Forward pass through the U-Net.
-      5. Reassemble the time axis, denormalise, and ISTFT back to audio.
-
-    Returns the enhanced waveform at the same length as the input.
-    """
-    log_max_clean, log_min_clean, log_max_reverb, log_min_reverb = stats
-
-    # -- Normalise input -------------------------------------------------------
-    reverb_wav = reverb_wav / 1.1 / (np.max(np.abs(reverb_wav)) + 1e-8)
-
-    # -- STFT → log-magnitude -------------------------------------------------
-    Z_mag, Z_phase = stft(reverb_wav, DEREVERB_K, DEREVERB_OVL)
-    if Z_mag.shape[1] < FRAMES_NUM:
-        raise RuntimeError(
-            f"Signal too short: {Z_mag.shape[1]} STFT frames, need >= {FRAMES_NUM}"
-        )
-
-    Z_log  = np.log(Z_mag.T + EPS)[np.newaxis, ...]               # (1, TIME, FREQ)
-    Z_norm = normalize_log_spec(Z_log, log_max_reverb, log_min_reverb)
-    Z_t    = torch.from_numpy(Z_norm.astype("float32"))            # (1, TIME, FREQ)
-
-    time_len   = Z_t.shape[1]
-    edge_index = time_len // FRAMES_NUM
-    residue    = time_len %  FRAMES_NUM
-
-    # -- Build batch of (1, FRAMES_NUM, K/2) segments -------------------------
-    to_model = Z_t[:, : edge_index * FRAMES_NUM, :-1].view(
-        -1, 1, FRAMES_NUM, DEREVERB_K // 2
-    )
-    if residue:
-        # Overlap the last segment so we don't lose trailing frames
-        last_part = Z_t[:, -FRAMES_NUM:, :-1].view(-1, 1, FRAMES_NUM, DEREVERB_K // 2)
-        to_model  = torch.cat([to_model, last_part], dim=0)
-
-    # -- Forward pass ---------------------------------------------------------
-    with torch.no_grad():
-        pred = net(to_model.to(device))
-    pred = pred.squeeze().cpu()     # (N_segments, FRAMES_NUM, K/2)
-
-    # -- Reassemble time axis -------------------------------------------------
-    if residue == 0:
-        recon = pred.view(edge_index * FRAMES_NUM, DEREVERB_K // 2)
-    else:
-        recon1 = pred[:-1].view(edge_index * FRAMES_NUM, DEREVERB_K // 2)
-        recon  = torch.cat((recon1, pred[-1, -residue:, :]), dim=0)
-
-    # Re-attach the highest frequency bin (was dropped during segmentation)
-    recon = torch.cat((recon, Z_t[0, :, -1:]), dim=1)
-
-    # -- Denormalise and ISTFT ------------------------------------------------
-    recon = denormalize_log_spec(recon, log_max_clean, log_min_clean)
-    s_hat = istft(recon.numpy().T, Z_phase, SYNT_WIN)
-    s_hat = s_hat / 1.1 / (np.max(np.abs(s_hat)) + 1e-8)
-    return s_hat[: len(reverb_wav)]
 
 
 # =============================================================================
@@ -410,7 +268,7 @@ def generate_rir_batch(model, conditions: torch.Tensor, data_info: dict, device:
 # SECTION 6 — Main evaluation loop
 # =============================================================================
 
-def run_evaluation(model, data_info: dict, dereverb_net, dereverb_stats, test_dataloader, speech_files: list, device: torch.device, guidance_scale: float, use_ddim: bool, num_inference_steps: int, rng: np.random.Generator) -> tuple:
+def run_evaluation(model, data_info: dict, dereverb_model: DereverbModel, test_dataloader, speech_files: list, device: torch.device, guidance_scale: float, use_ddim: bool, num_inference_steps: int, rng: np.random.Generator) -> tuple:
     """
     Iterate over all batches in the GTU test set.
 
@@ -436,7 +294,7 @@ def run_evaluation(model, data_info: dict, dereverb_net, dereverb_stats, test_da
     scale_rir  = data_info.get("scale_rir", False)
 
     # Minimum clean speech length required by the dereverberation model
-    min_speech_samples = int(FRAMES_NUM * DEREVERB_K * (1 - DEREVERB_OVL) + DEREVERB_K)
+    min_speech_samples = dereverb_model.min_speech_samples
 
     all_real, all_gen, samples = [], [], []
 
@@ -498,8 +356,8 @@ def run_evaluation(model, data_info: dict, dereverb_net, dereverb_stats, test_da
 
             # Dereverberate
             try:
-                dereverb_real = dereverberate(reverb_real, dereverb_net, device, dereverb_stats)
-                dereverb_gen  = dereverberate(reverb_gen,  dereverb_net, device, dereverb_stats)
+                dereverb_real = dereverb_model.dereverberate(reverb_real)
+                dereverb_gen  = dereverb_model.dereverberate(reverb_gen)
             except RuntimeError:
                 continue     # signal too short after STFT — skip
 
@@ -604,7 +462,7 @@ def _save_tables(real_agg: dict, gen_agg: dict, args, n_samples: int, save_path:
 
     lines += ["Config", "-" * W,
               f"  diffusion_model  : {args.diffusion_model_path}",
-              f"  dereverb_dir     : {args.dereverb_model_dir}",
+              f"  dereverb_model   : {args.dereverb_model}",
               f"  guidance_scale   : {args.guidance_scale}",
               f"  steps            : {args.num_inference_steps}",
               f"  ddim             : {args.use_ddim}"]
@@ -719,7 +577,16 @@ def parse_args():
 
     # -- Model paths ----------------------------------------------------------
     parser.add_argument("--diffusion_model_path", type=str, default="Dec24_20-02-59_dsief07", help="Run folder name (e.g. Dec24_20-02-59_dsief07), folder path, or full path to model_best.pth.tar (see script header)")
-    parser.add_argument("--dereverb_model_dir", type=str, default="/home/yuvalmad/Projects/scene_agnostic_dereverberation/trained_models/mics1_24.02.2026_17:27:55", help="Directory with settings.txt + checkpoints/ sub-folder (see script header)")
+
+    # -- Dereverberation model selection --------------------------------------
+    parser.add_argument("--dereverb_model", type=str, default="nara_wpe", choices=["unet", "nara_wpe"],
+                        help="Dereverberation model to use as probe. 'unet' requires scene_agnostic_dereverberation on disk.")
+    # scene agnostic unet settings (only used if --dereverb_model unet)
+    parser.add_argument("--dereverb_model_dir", type=str, default=None, help="[unet only] Directory with settings.txt + checkpoints/ sub-folder")
+    # nara_wpe settings (only used if --dereverb_model nara_wpe)``
+    parser.add_argument("--wpe_taps", type=int, default=30, help="[nara_wpe] WPE filter taps (default: 30)")
+    parser.add_argument("--wpe_delay", type=int, default=3, help="[nara_wpe] WPE delay in frames (default: 3)")
+    parser.add_argument("--wpe_iterations", type=int, default=15, help="[nara_wpe] WPE refinement iterations (default: 15)")
 
     # -- Generation settings --------------------------------------------------
     parser.add_argument("--guidance_scale", type=float, default=2.5, help="CFG guidance scale for the diffusion model (1.0 = no guidance)")
@@ -762,17 +629,6 @@ def main():
     rng = np.random.default_rng(args.seed)
     torch.manual_seed(args.seed)
 
-    # ── Output directory ──────────────────────────────────────────────────────
-    if args.save_path is None:
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        folder_name = f"dereverb_eval_{ts}_guidance{args.guidance_scale}"
-        if args.debug_mode:
-            folder_name += "_DEBUG"
-        args.save_path = str(Path(args.diffusion_model_path).parent / folder_name)
-    save_path = Path(args.save_path)
-    save_path.mkdir(parents=True, exist_ok=True)
-    print(f"Output : {save_path}\n")
-
     # ── Load models ───────────────────────────────────────────────────────────
     print("── Loading RIR diffusion model ─────────────────────────────────────────")
     model, data_info = load_diffusion_model(args.diffusion_model_path, device)
@@ -784,7 +640,17 @@ def main():
         args.guidance_scale = 1.0
 
     print("\n── Loading dereverberation model ───────────────────────────────────────")
-    dereverb_net, dereverb_stats = load_dereverb_model(args.dereverb_model_dir, device)
+    dereverb_model = build_dereverb_model(args, device)
+
+    # ── Output directory (deferred until after models load successfully) ───────
+    if args.save_path is None:
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        folder_name = f"dereverb_eval_{ts}_guidance{args.guidance_scale}_{dereverb_model.name}"
+        if args.debug_mode:
+            folder_name += "_DEBUG"
+        args.save_path = str(Path(args.diffusion_model_path).parent / folder_name)
+    save_path = Path(args.save_path)
+    print(f"Output : {save_path}\n")
 
     # ── Load test dataset ─────────────────────────────────────────────────────
     print("\n── Loading GTU test split ──────────────────────────────────────────────")
@@ -810,7 +676,7 @@ def main():
         f"  |  ddim={args.use_ddim}  |  batch={args.batch_size}"
     )
 
-    all_real, all_gen, samples = run_evaluation(model, data_info, dereverb_net, dereverb_stats, test_dataloader, speech_files, device, args.guidance_scale, args.use_ddim, args.num_inference_steps, rng)
+    all_real, all_gen, samples = run_evaluation(model, data_info, dereverb_model, test_dataloader, speech_files, device, args.guidance_scale, args.use_ddim, args.num_inference_steps, rng)
 
     if not all_real:
         print("\nNo valid samples were processed. Check data paths and signal lengths.")
@@ -821,6 +687,7 @@ def main():
     gen_agg  = aggregate(all_gen)
 
     print_results_table(real_agg, gen_agg, n_samples=len(all_real))
+    save_path.mkdir(parents=True, exist_ok=True)
     save_results(real_agg, gen_agg, all_real, all_gen, samples, args, save_path)
 
 
