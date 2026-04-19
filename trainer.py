@@ -131,13 +131,12 @@ class DiffusionTrainer():
         epoch_norm_loss = 0.0
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{self.epochs} [Train]")
 
-        for rir, room_dim, mic_loc, speaker_loc, rt60 in progress_bar:
-            loss_value, norm_loss_value = self._forward_step(rir, room_dim, mic_loc, speaker_loc, rt60, training=True, scaler=scaler)
-            
+        for batch in progress_bar:
+            loss_value, norm_loss_value = self._forward_step(batch, training=True, scaler=scaler)
             if self.accelerator.is_main_process:
-                epoch_loss += loss_value
+                epoch_loss      += loss_value
                 epoch_norm_loss += norm_loss_value
-        
+
         return epoch_loss, epoch_norm_loss
 
     def _evaluation_epoch(self, eval_dataloader, epoch):
@@ -147,65 +146,70 @@ class DiffusionTrainer():
             epoch_norm_loss = 0.0
             self.model.eval()
             progress_bar = tqdm(eval_dataloader, desc=f"Epoch {epoch+1}/{self.epochs} [Eval]")
-            
+
             with torch.no_grad():
-                for rir, room_dim, mic_loc, speaker_loc, rt60 in progress_bar:
-                    loss_value, norm_loss_value = self._forward_step(rir, room_dim, mic_loc, speaker_loc, rt60, training=False)
-                    
+                for batch in progress_bar:
+                    loss_value, norm_loss_value = self._forward_step(batch, training=False)
                     if self.accelerator.is_main_process:
-                        epoch_loss += loss_value
+                        epoch_loss      += loss_value
                         epoch_norm_loss += norm_loss_value
         else:
-            epoch_loss = None
-            epoch_norm_loss = None
+            epoch_loss = epoch_norm_loss = None
 
-        
         return epoch_loss, epoch_norm_loss
 
-    def _forward_step(self, rir, room_dim, mic_loc, speaker_loc, rt60, training=True, scaler=None):
-        """Common forward step for training and evaluation"""
-        # prepare data
-        rir = rir.to(self.device)  # [B, T] waveform
+    def _forward_step(self, batch, training=True, scaler=None):
+        """Common forward step for training and evaluation.
+
+        batch is a dict produced by scale_and_spectrogram_collate_fn with keys:
+            'rir'         — [B, T] waveform (collate scaling applied)
+            'room_dim'    — [B, 3]
+            'mic_loc'     — [B, 3]
+            'speaker_loc' — [B, 3]
+            'rt60'        — [B]         (GTU only)
+            'images'      — [B, N, 3, H, W]  (SoundSpaces only, optional)
+        """
+        # ---- prepare spectrogram ----
+        rir = batch['rir'].to(self.device)                                # [B, T]
         rir = waveform_to_spectrogram(rir, hop_length=self.hop_length, n_fft=self.n_fft)  # [B, 2, F, T]
 
-        condition = torch.cat([room_dim, mic_loc, speaker_loc, rt60.unsqueeze(1)], dim=1).to(self.device).float()  # [B, 10]
-        noise = torch.randn_like(rir).to(self.device)
+        # ---- build scalar conditioning ----
+        parts = [batch['room_dim'], batch['mic_loc'], batch['speaker_loc']]
+        if 'rt60' in batch:
+            parts.append(batch['rt60'].unsqueeze(1))
+        condition = torch.cat(parts, dim=1).to(self.device).float()       # [B, 9] or [B, 10]
 
-        # Sample a random timestep for each image
-        timesteps = torch.randint(0, self.noise_scheduler.num_train_timesteps, (rir.shape[0],),
-                                  device=self.device).long()
+        # ---- optional images ----
+        images = batch['images'].to(self.device) if 'images' in batch else None
 
-        # Add noise to the clean images according to the noise magnitude at each timestep
+        noise     = torch.randn_like(rir).to(self.device)
+        timesteps = torch.randint(0, self.noise_scheduler.num_train_timesteps,
+                                  (rir.shape[0],), device=self.device).long()
+
         noisy_rirs = self.noise_scheduler.add_noise(rir, noise, timesteps)
 
         if training:
             self.optimizer.zero_grad()
 
-        # Predict the noise residual and Compute loss
+        # ---- forward + loss ----
         if self.use_amp:
             with autocast("cuda"):
-                prediction = self.model(noisy_rirs, timesteps, condition.unsqueeze(1))
-                noise_pred = prediction["sample"]
+                noise_pred = self.model(noisy_rirs, timesteps, condition, images=images)["sample"]
                 loss = F.mse_loss(noise_pred, noise)
-            
             if training:
-                # Mixed precision backward pass
                 scaler.scale(loss).backward()
                 scaler.step(self.optimizer)
                 scaler.update()
         else:
-            prediction = self.model(noisy_rirs, timesteps, condition.unsqueeze(1))
-            noise_pred = prediction["sample"]
+            noise_pred = self.model(noisy_rirs, timesteps, condition, images=images)["sample"]
             loss = F.mse_loss(noise_pred, noise)
-            
             if training:
                 loss.backward()
                 self.optimizer.step()
-            
-        # gather loss values across all processes (for logging)
-        loss_value = self.accelerator.gather_for_metrics(loss.detach()).mean().item()
+
+        loss_value      = self.accelerator.gather_for_metrics(loss.detach()).mean().item()
         norm_loss_value = self.calculate_norm_loss(noisy_rirs, loss).mean().item()
-        
+
         return loss_value, norm_loss_value
 
     def calculate_norm_loss(self, noisy_rirs, loss):

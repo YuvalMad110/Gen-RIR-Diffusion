@@ -6,11 +6,18 @@
   "norm_num_groups": null,
   "use_mid_block": true,
   "use_cond_encoder": true,
-  "encoder_hidden_dims": [64,128],
-  "input_cond_dim": 10,
+  "encoder_hidden_dims": [64, 128],
   "image_fusion": "cross_attn",
   "in_channels": 2,
   "out_channels": 2,
   "guidance_enabled": true,
-  "guidance_dropout_prob": 0.1
+  "guidance_dropout_prob": 0.1,
+  "image_encoder_config": {
+    "model_variant": "large",
+    "feature_mode": "pyramid",
+    "last_n": 4,
+    "layer_combination": "fuse",
+    "spatial_pool_factor": null,
+    "image_size": [392, 518]
+  }
 }

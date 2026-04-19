@@ -3,6 +3,7 @@ import time
 import datetime
 import logging
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import shutil
 from accelerate import Accelerator
@@ -23,13 +24,66 @@ from typing import List, Tuple, Optional, Union
 #     - understand whether a conditioning encoder is necessary
 #     - use RT60(freq)
 
+
+class FusionBlock(nn.Module):
+    """
+    Optional cross-attention fusion between the scalar conditioning token and
+    image patch tokens, applied before UNet cross-attention.
+
+    The scalar token (query) attends to image tokens (key/value), so the
+    spatial conditioning can selectively absorb room-relevant visual cues.
+    The result is concatenated with the image tokens to form the full
+    conditioning sequence for the UNet.
+
+    Design choices:
+      Pre-LN  — both inputs are layer-normalised before attention so that
+                neither scale differences between modalities nor the lack of
+                prior normalisation on the scalar MLP output destabilise
+                the attention scores.
+      Residual — the original scalar_token is added back after attention,
+                 ensuring that the precise spatial coordinates (room dims,
+                 mic/speaker positions) are never washed out by visual
+                 features.
+
+    This block is intentionally separate so it can be toggled for ablation
+    studies.  Set image_fusion='concat' in RIRDiffusionModel to bypass it
+    and fall back to simple concatenation.
+
+    Args:
+        dim:       Feature dimension (must equal cross_attention_dim).
+        num_heads: Number of attention heads (default 4).
+    """
+
+    def __init__(self, dim: int, num_heads: int = 4):
+        super().__init__()
+        self.norm_scalar = nn.LayerNorm(dim)
+        self.norm_image  = nn.LayerNorm(dim)
+        self.attn        = nn.MultiheadAttention(
+            embed_dim=dim, num_heads=num_heads, batch_first=True)
+
+    def forward(self,
+                scalar_token: torch.Tensor,
+                image_tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            scalar_token:  [B, 1, dim]
+            image_tokens:  [B, T, dim]
+
+        Returns:
+            fused_scalar:  [B, 1, dim]
+        """
+        q = self.norm_scalar(scalar_token)   # Pre-LN on query
+        k = self.norm_image(image_tokens)    # Pre-LN on key/value
+        attn_out, _ = self.attn(query=q, key=k, value=k)
+        return scalar_token + attn_out       # Residual: preserve spatial coords
+
 class RIRDiffusionModel(torch.nn.Module):
     """
     Diffusion model for RIR (Room Impulse Response) generation.
     """
     
-    def __init__(self, 
-                 device, 
+    def __init__(self,
+                 device,
                  sample_size=None,
                  n_timesteps=1000,
                  # UNet architecture parameters
@@ -43,41 +97,55 @@ class RIRDiffusionModel(torch.nn.Module):
                  use_cond_encoder: bool = False,
                  encoder_hidden_dims: Optional[List[int]] = [64, 128],
                  input_cond_dim: int = 10,
+                 # Image conditioning parameters
+                 image_encoder: Optional['ImageEncoder'] = None,
+                 image_fusion: str = 'cross_attn',
                  # Guidance parameters (CFG - Classifier-Free Guidance)
                  guidance_enabled: bool = False,
                  guidance_dropout_prob: float = 0.1,
                  # Model I/O parameters
                  in_channels: int = 2,
                  out_channels: int = 2):
-        """        
+        """
         Args:
-            device: Device to run the model on
-            sample_size: Size of the input sample
-            n_timesteps: Number of diffusion timesteps
-            
+            device:        Device to run the model on
+            sample_size:   Size of the input sample
+            n_timesteps:   Number of diffusion timesteps
+
             UNet parameters:
-            block_out_channels: Tuple of output channels for each block level
-            layers_per_block: Number of ResNet layers per block (single int or list)
+            block_out_channels:  Tuple of output channels for each block level
+            layers_per_block:    Number of ResNet layers per block (single int or list)
             use_cross_attention: List of booleans for each block level, None for auto
-            attention_head_dim: Dimension of attention heads
-            norm_num_groups: Number of groups for GroupNorm, None for auto
-            use_mid_block: Whether to use a middle block
-            
+            attention_head_dim:  Dimension of attention heads
+            norm_num_groups:     Number of groups for GroupNorm, None for auto
+            use_mid_block:       Whether to use a middle block
+
             Conditioning parameters:
-            use_cond_encoder: Whether to use a conditioning encoder
-            encoder_hidden_dims: Hidden dimensions for encoder layers
-            input_cond_dim: Input dimension for conditioning
-            
+            use_cond_encoder:    Whether to use a conditioning encoder MLP
+            encoder_hidden_dims: Hidden dimensions for the conditioning MLP layers
+            input_cond_dim:      Input dimension of the scalar conditioning vector
+                                 (9 for SoundSpaces without RT60, 10 for GTU with RT60)
+
+            Image conditioning parameters:
+            image_encoder:  Pre-built ImageEncoder instance, or None to disable image
+                            conditioning.  The encoder's out_dim must equal the scalar
+                            encoder's output dim (cross_attention_dim) so both token
+                            types share the same cross-attention sequence.
+            image_fusion:   How to combine the scalar token with image tokens before
+                            the UNet.  'concat' concatenates them directly;
+                            'cross_attn' (default) inserts a FusionBlock where the scalar token
+                            attends to image tokens first (useful for ablation studies).
+
             Guidance parameters (CFG - Classifier-Free Guidance):
-            guidance_enabled: Whether to enable guidance dropout during training
+            guidance_enabled:      Whether to enable guidance dropout during training
             guidance_dropout_prob: Probability of dropping conditioning during training
-            
+
             I/O parameters:
-            in_channels: Number of input channels
+            in_channels:  Number of input channels
             out_channels: Number of output channels
         """
         super().__init__()
-        
+
         # -------- Config --------
         self.device = device
         self.n_timesteps = n_timesteps
@@ -86,6 +154,7 @@ class RIRDiffusionModel(torch.nn.Module):
         self.input_cond_dim = input_cond_dim
         self.guidance_enabled = guidance_enabled
         self.guidance_dropout_prob = guidance_dropout_prob
+        self.image_fusion = image_fusion
         
         # -------- Auto-configure parameters --------
         norm_num_groups, use_cross_attention, down_block_types, up_block_types, mid_block_type = self._auto_configure_model_params(
@@ -111,7 +180,16 @@ class RIRDiffusionModel(torch.nn.Module):
         
         # Store cross_attention_dim for null conditioning
         self._cross_attention_dim = cross_attention_dim
-        
+
+        # -------- Image encoder + optional fusion block --------
+        self.image_encoder = None
+        self.fusion_block   = None
+        if image_encoder is not None:
+            assert image_encoder.out_dim == cross_attention_dim, f"image_encoder.out_dim ({image_encoder.out_dim}) must equal cross_attention_dim ({cross_attention_dim})"
+            self.image_encoder = image_encoder
+            if image_fusion == 'cross_attn':
+                self.fusion_block = FusionBlock(dim=cross_attention_dim)
+
         # -------- Base UNet Model --------
         # Only use cross_attention_dim if we have cross-attention blocks
         if not(any(use_cross_attention) or (use_mid_block and mid_block_type == "UNetMidBlock2DCrossAttn")):
@@ -144,6 +222,8 @@ class RIRDiffusionModel(torch.nn.Module):
             'use_cond_encoder': use_cond_encoder,
             'encoder_hidden_dims': encoder_hidden_dims if use_cond_encoder else None,
             'input_cond_dim': input_cond_dim,
+            'use_image_conditioning': image_encoder is not None,
+            'image_fusion': image_fusion if image_encoder is not None else None,
             'guidance_enabled': guidance_enabled,
             'guidance_dropout_prob': guidance_dropout_prob,
             'in_channels': in_channels,
@@ -221,23 +301,17 @@ class RIRDiffusionModel(torch.nn.Module):
         return norm_num_groups, use_cross_attention, down_block_types, up_block_types, mid_block_type
     
     def get_model_params(self):
-        """Get all trainable parameters."""
-        model_params = list(self.model.parameters()) + list(self.condition_encoder.parameters()) \
-            if self.use_cond_encoder else self.model.parameters()
-        return model_params
-    
-    def get_null_conditioning(self, batch_size: int) -> torch.Tensor:
+        """Get all trainable parameters (excludes frozen backbone weights)."""
+        return [p for p in self.parameters() if p.requires_grad]
+
+    def get_null_conditioning(self, batch_size: int, seq_len: int = 1) -> torch.Tensor:
         """
-        Get null/empty conditioning for unconditional generation.
-        Returns zeros in the conditioning space.
-        
-        Args:
-            batch_size: Number of samples in the batch
-            
-        Returns:
-            Null conditioning tensor of shape [B, 1, cross_attention_dim]
+        Returns a zero conditioning tensor of shape [B, seq_len, cross_attention_dim].
+
+        seq_len must match the conditioning sequence used during the forward pass
+        so that CFG unconditional and conditional predictions have the same shape.
         """
-        return torch.zeros(batch_size, 1, self._cross_attention_dim, device=self.device)
+        return torch.zeros(batch_size, seq_len, self._cross_attention_dim, device=self.device)
     
     def encode_conditioning(self, cond: torch.Tensor) -> torch.Tensor:
         """
@@ -256,67 +330,71 @@ class RIRDiffusionModel(torch.nn.Module):
     
     def apply_guidance_dropout(self, cond_encoded: torch.Tensor) -> torch.Tensor:
         """
-        Apply guidance dropout to encoded conditioning.
-        Randomly replaces some samples with null conditioning.
-        
+        Apply guidance dropout to the full conditioning sequence.
+        Randomly zeros the entire sequence for a fraction of samples.
+
+        The mask shape [B, 1, 1] broadcasts across all sequence positions and
+        feature dimensions, so all tokens (scalar + image) are dropped together.
+
         Args:
-            cond_encoded: Encoded conditioning tensor of shape [B, 1, C]
-            
+            cond_encoded: [B, seq_len, cross_attention_dim]
+
         Returns:
-            Conditioning with random dropout applied
+            Conditioning with random dropout applied, same shape as input
         """
-        batch_size = cond_encoded.shape[0]
-        
-        # Create dropout mask [B, 1, 1] - same for all features in a sample
+        batch_size, seq_len, _ = cond_encoded.shape
         dropout_mask = torch.rand(batch_size, 1, 1, device=self.device) < self.guidance_dropout_prob
-        
-        # Get null conditioning
-        null_cond = self.get_null_conditioning(batch_size)
-        
-        # Replace with null conditioning where mask is True
+        null_cond    = self.get_null_conditioning(batch_size, seq_len)
         return torch.where(dropout_mask, null_cond, cond_encoded)
     
-    def forward(self, x, t, cond):
+    def forward(self, x, t, cond, images=None):
         """
         Forward pass through the model.
-        
+
         Args:
-            x: Noisy input tensor
-            t: Timestep tensor
-            cond: Conditioning tensor of shape [B, input_cond_dim]
+            x:      Noisy input spectrogram [B, C, F, T]
+            t:      Timestep tensor [B]
+            cond:   Scalar conditioning vector [B, input_cond_dim]
+            images: Image batch [B, N_img, 3, H, W]. Required when the model
+                    was built with an image_encoder; must be None otherwise.
         """
-        # Ensure cond is 2D [B, D]
         if cond.dim() == 3:
             cond = cond.squeeze(1)
-        
-        # Encode conditioning
-        cond_encoded = self.encode_conditioning(cond)
-        
-        # Apply guidance dropout during training if enabled
+
+        scalar_token = self.encode_conditioning(cond)       # [B, 1, D]
+
+        if self.image_encoder is not None:
+            image_tokens = self.image_encoder(images)       # [B, T, D]
+            if self.fusion_block is not None:
+                scalar_token = self.fusion_block(scalar_token, image_tokens)
+            cond_encoded = torch.cat([scalar_token, image_tokens], dim=1)  # [B, 1+T, D]
+        else:
+            cond_encoded = scalar_token                     # [B, 1, D]
+
         if self.guidance_enabled and self.training:
             cond_encoded = self.apply_guidance_dropout(cond_encoded)
-        
-        prediction = self.model(x, t, cond_encoded)
-        return prediction
+
+        return self.model(x, t, cond_encoded)
     
     @torch.no_grad()
-    def generate(self, cond: torch.Tensor, shape: torch.Size, num_inference_steps: int = None, 
-                 guidance_scale: float = 1.0, use_ddim: bool = False, verbose: bool = True):
+    def generate(self, cond: torch.Tensor, shape: torch.Size, images=None,
+                 num_inference_steps: int = None, guidance_scale: float = 1.0,
+                 use_ddim: bool = False, verbose: bool = True):
         """
         Generate a synthetic RIR conditioned on input parameters with optional guidance.
 
         Args:
-            cond: Tensor of shape [input_cond_dim] or [B, input_cond_dim] containing conditioning
-            shape: Shape of the output tensor
-            num_inference_steps: Number of reverse diffusion steps (when smaller then (train) self.n_timesteps, DDIM is forced)
-            guidance_scale: Classifier-free guidance scale.
-                       1.0 = no guidance (conditional only)
-                       >1.0 = stronger conditioning effect
-            use_ddim: Whether to use DDIM (faster) instead of DDPM sampling
-            verbose: Whether to show progress ba
+            cond:                Tensor [input_cond_dim] or [B, input_cond_dim]
+            shape:               Shape of the output tensor
+            images:              Image batch [B, N_img, 3, H, W], or None.
+                                 Required when the model has an image_encoder.
+            num_inference_steps: Reverse diffusion steps (< n_timesteps forces DDIM)
+            guidance_scale:      CFG scale. 1.0 = no guidance; >1.0 = stronger effect
+            use_ddim:            Use DDIM (faster) instead of DDPM
+            verbose:             Show progress bar
 
         Returns:
-            Generated RIR signal
+            Generated RIR signal (CPU tensor)
         """
         self.model.eval()
         if cond.dim() == 1:
@@ -324,10 +402,19 @@ class RIRDiffusionModel(torch.nn.Module):
         cond = cond.float().to(self.device)
         batch_size = cond.shape[0]
 
-        # Encode conditioning
-        cond_encoded = self.encode_conditioning(cond)
-        # Prepare null conditioning for guidance
-        null_cond = self.get_null_conditioning(batch_size)
+        # Build conditional encoding
+        scalar_token = self.encode_conditioning(cond)       # [B, 1, D]
+        if self.image_encoder is not None:
+            image_tokens = self.image_encoder(images)       # [B, T, D]
+            if self.fusion_block is not None:
+                scalar_token = self.fusion_block(scalar_token, image_tokens)
+            cond_encoded = torch.cat([scalar_token, image_tokens], dim=1)
+        else:
+            cond_encoded = scalar_token
+
+        seq_len   = cond_encoded.shape[1]
+        null_cond = self.get_null_conditioning(batch_size, seq_len)
+
         # Initialize with Gaussian noise
         noisy_rir = torch.randn(shape, device=self.device)
 
