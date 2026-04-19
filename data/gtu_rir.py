@@ -1,12 +1,9 @@
-# datasets/gtu_rir.py (Clean factory function implementation)
-import tarfile
 import pickle
 import torch
 from torch.utils.data import Dataset
 import torchaudio
 import numpy as np
-from sklearn.model_selection import train_test_split
-import hashlib
+from utils.dataset_utils import create_data_splits
 
 class GTURIRDataset(Dataset):
     def __init__(self, data, mode='raw', sample_max_sec=2, hop_length=256, n_fft=512, 
@@ -119,66 +116,6 @@ def _load_data_from_tar(tar_path, inside_file='RIR.pickle.dat'):
         return pickle.load(f)
 
 
-def _create_data_splits(all_data, train_ratio=0.7, eval_ratio=0.15, test_ratio=0.15, 
-                       random_seed=42, split_by_room=True):
-    """Create train/eval/test data splits"""
-    assert abs(train_ratio + eval_ratio + test_ratio - 1.0) < 1e-6, "Split ratios must sum to 1.0"
-    
-    np.random.seed(random_seed)
-    
-    # Define field numbers for room ID access
-    rir_data_field_numbers = {"roomId": 36}
-    
-    if split_by_room:
-        # Split by room IDs to prevent data leakage
-        room_ids = [sample[rir_data_field_numbers['roomId']] for sample in all_data]
-        unique_room_ids = list(set(room_ids))
-        
-        # Create a deterministic but pseudo-random order based on room IDs
-        unique_room_ids.sort()  # Ensure consistent ordering
-        room_hash_seeds = [int(hashlib.md5(f"{room_id}_{random_seed}".encode()).hexdigest()[:8], 16) 
-                          for room_id in unique_room_ids]
-        room_order = np.argsort(room_hash_seeds)
-        unique_room_ids = [unique_room_ids[i] for i in room_order]
-        
-        n_rooms = len(unique_room_ids)
-        n_train_rooms = int(n_rooms * train_ratio)
-        n_eval_rooms = int(n_rooms * eval_ratio)
-        
-        train_room_ids = set(unique_room_ids[:n_train_rooms])
-        eval_room_ids = set(unique_room_ids[n_train_rooms:n_train_rooms + n_eval_rooms])
-        test_room_ids = set(unique_room_ids[n_train_rooms + n_eval_rooms:])
-        
-        # Filter data based on room IDs
-        train_data = [sample for sample in all_data 
-                     if sample[rir_data_field_numbers['roomId']] in train_room_ids]
-        eval_data = [sample for sample in all_data 
-                    if sample[rir_data_field_numbers['roomId']] in eval_room_ids]
-        test_data = [sample for sample in all_data 
-                    if sample[rir_data_field_numbers['roomId']] in test_room_ids]
-        
-    else:
-        # Random split (may have data leakage if same rooms appear in different splits)
-        indices = np.arange(len(all_data))
-        
-        # First split: train vs (eval + test)
-        train_indices, temp_indices = train_test_split(
-            indices, test_size=(eval_ratio + test_ratio), 
-            random_state=random_seed, shuffle=True
-        )
-        
-        # Second split: eval vs test
-        eval_indices, test_indices = train_test_split(
-            temp_indices, test_size=test_ratio/(eval_ratio + test_ratio),
-            random_state=random_seed, shuffle=True
-        )
-        
-        train_data = [all_data[i] for i in train_indices]
-        eval_data = [all_data[i] for i in eval_indices]
-        test_data = [all_data[i] for i in test_indices]
-    
-    return train_data, eval_data, test_data
-
 
 def create_gtu_datasets(tar_path, split=True, nSamples=None, train_ratio=0.7, eval_ratio=0.15, 
                        test_ratio=0.15, random_seed=42, split_by_room=True, inside_file='RIR.pickle.dat',
@@ -211,8 +148,13 @@ def create_gtu_datasets(tar_path, split=True, nSamples=None, train_ratio=0.7, ev
     
     if split:
         # Create splits and return 3 datasets
-        train_data, eval_data, test_data = _create_data_splits(
-            all_data, train_ratio, eval_ratio, test_ratio, random_seed, split_by_room
+        room_ids = [sample[36] for sample in all_data]  # field 36 = roomId
+        train_data, eval_data, test_data = create_data_splits(
+            all_data,
+            group_keys=room_ids if split_by_room else None,
+            split_by_group=split_by_room,
+            train_ratio=train_ratio, eval_ratio=eval_ratio,
+            test_ratio=test_ratio, seed=random_seed,
         )
         
         train_dataset = GTURIRDataset(train_data, split_name='train', **dataset_kwargs)
