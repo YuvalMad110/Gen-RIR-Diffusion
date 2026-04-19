@@ -173,6 +173,16 @@ All scripts use these default paths (override via CLI arguments):
 
 ---
 
+## Python Dependencies
+
+Install the image encoder backbone (DA3 ViT-L, auto-downloads weights from HuggingFace on first use):
+
+```bash
+python3 -m pip install depth-anything-3
+```
+
+---
+
 ## Preparation Scripts
 
 All scripts live in `data/data_preparation/`. See that folder's `README.md` for a full index.
