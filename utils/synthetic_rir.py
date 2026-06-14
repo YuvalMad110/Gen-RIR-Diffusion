@@ -88,16 +88,19 @@ RIR_METHODS = {
 }
 
 
-def generate_synthetic_rirs_batch(conditions, sr, max_length_samples=None, method='pra', verbose=True):
+def generate_synthetic_rirs_batch(conditions, sr, max_length_samples=None, method='pra', verbose=True, rt60_estimates=None, dataset_name='gtu'):
     """Generate synthetic RIRs for a batch of conditions.
 
     Args:
-        conditions: np.array of shape [n_samples, 10] or list of condition arrays.
-                   Format: [room_length, room_width, room_height, mic_x, mic_y, mic_z, speaker_x, speaker_y, speaker_z, rt60]
+        conditions: np.array of shape [n_samples, 10] or [n_samples, 9], or list of condition arrays.
+                   Format: [room_length, room_width, room_height, mic_x, mic_y, mic_z, speaker_x, speaker_y, speaker_z, (rt60)]
         sr: Sample rate
         max_length_samples: Maximum RIR length in samples (for truncation/padding)
         method: RIR generation method ('pra' for pyroomacoustics, 'habets' for RIR-Generator)
         verbose: Show tqdm progress bar (default True)
+        rt60_estimates: Per-sample RT60 values (seconds). Required when conditions are 9-dim (no RT60 in vector).
+        dataset_name: 'soundspaces' or 'gtu'. SoundSpaces positions are room-center-relative and must be
+                      shifted by (L/2, W/2) before passing to the generators.
 
     Returns:
         rirs: List of RIR waveforms (numpy arrays, float32)
@@ -115,7 +118,18 @@ def generate_synthetic_rirs_batch(conditions, sr, max_length_samples=None, metho
         room_dims = cond[:3].tolist()
         mic_pos = cond[3:6].tolist()
         speaker_pos = cond[6:9].tolist()
-        rt60 = float(cond[9])
+        if len(cond) > 9:
+            rt60 = float(cond[9])
+        elif rt60_estimates is not None:
+            rt60 = float(rt60_estimates[i])
+        else:
+            raise ValueError("RT60 not in condition vector and no rt60_estimates provided")
+
+        # SoundSpaces u,v are room-center-relative; generators require corner-relative [0,L]x[0,W]
+        if dataset_name == 'soundspaces':
+            L, W = room_dims[0], room_dims[1]
+            mic_pos     = [mic_pos[0]     + L / 2, mic_pos[1]     + W / 2, mic_pos[2]]
+            speaker_pos = [speaker_pos[0] + L / 2, speaker_pos[1] + W / 2, speaker_pos[2]]
 
         extra_kwargs = {}
         if method == 'habets' and max_length_samples is not None:

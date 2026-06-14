@@ -159,6 +159,17 @@ def compute_t60(rir: np.ndarray, sr: int) -> float:
     return estimate_t60_from_edc(edc_db, sr)
 
 
+def compute_t60_batch(rirs: List[np.ndarray], sr: int) -> List[float]:
+    """Compute broadband T60 for a list of RIRs. Raises ValueError if any estimate returns NaN."""
+    results = []
+    for i, rir in enumerate(rirs):
+        t60 = compute_t60(rir, sr)
+        if np.isnan(t60):
+            raise ValueError(f"RT60 estimation returned NaN for RIR at index {i}.")
+        results.append(t60)
+    return results
+
+
 def compute_t60_octave_bands(rir: np.ndarray, sr: int,
                               center_freqs: List[float] = None) -> Dict[float, float]:
     """

@@ -186,9 +186,9 @@ class RIRDiffusionModel(torch.nn.Module):
         self.fusion_block   = None
         if image_encoder is not None:
             assert image_encoder.out_dim == cross_attention_dim, f"image_encoder.out_dim ({image_encoder.out_dim}) must equal cross_attention_dim ({cross_attention_dim})"
-            self.image_encoder = image_encoder
+            self.image_encoder = image_encoder.to(self.device)
             if image_fusion == 'cross_attn':
-                self.fusion_block = FusionBlock(dim=cross_attention_dim)
+                self.fusion_block = FusionBlock(dim=cross_attention_dim).to(self.device)
 
         # -------- Base UNet Model --------
         # Only use cross_attention_dim if we have cross-attention blocks
@@ -235,6 +235,21 @@ class RIRDiffusionModel(torch.nn.Module):
         }
         
     
+    # All model_config keys that map directly to __init__ parameters; derived keys are excluded.
+    _CONSTRUCTOR_KEYS = {
+        'sample_size', 'n_timesteps',
+        'block_out_channels', 'layers_per_block', 'use_cross_attention',
+        'attention_head_dim', 'norm_num_groups', 'use_mid_block', 'use_cond_encoder',
+        'encoder_hidden_dims', 'input_cond_dim', 'image_fusion', 'guidance_enabled',
+        'guidance_dropout_prob', 'in_channels', 'out_channels'
+    }
+
+    @classmethod
+    def init_from_config(cls, model_config, device, image_encoder=None):
+        """Create an instance from a model_config dict, removing non-__init__ keys."""
+        params = {k: v for k, v in model_config.items() if k in cls._CONSTRUCTOR_KEYS}
+        return cls(device=device, image_encoder=image_encoder, **params)
+
     def _find_optimal_norm_groups(self, channels: Tuple[int, ...]) -> int:
         """Find the optimal number of groups for GroupNorm that divides all channel dimensions."""
         import math

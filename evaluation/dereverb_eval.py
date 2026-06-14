@@ -94,10 +94,11 @@ if str(EVAL_DIR) not in sys.path:
     sys.path.insert(1, str(EVAL_DIR))
 
 # --- Gen-RIR-Diffusion imports -----------------------------------------------
-from RIRDiffusionModel import RIRDiffusionModel
-from data.rir_dataset import load_rir_dataset
-from utils.inference_data_loading import load_model_and_data_info
-from utils.misc import str2bool
+from utils.inference_data_loading import (
+    load_pretrained_model, data_params_from_run_config,
+    build_test_dataloader, _normalize_batch_to_dict, build_condition_tensor,
+)
+from utils.misc import str2bool, resolve_model_dir
 from utils.signal_proc import (
     spectrogram_to_waveform,
     undo_rir_scaling,
@@ -113,21 +114,22 @@ from dereverberation_models import build_dereverb_model, DEREVERB_SR, DereverbMo
 # SECTION 1 — Model loading
 # =============================================================================
 
-def load_diffusion_model(model_path: str, device: torch.device):
-    """
-    Load the RIR generation diffusion model from a checkpoint.
+def load_diffusion_model(model_dir: Path, device: torch.device):
+    """Load the RIR generation diffusion model from a run directory.
 
     Returns
     -------
     model     : RIRDiffusionModel ready for inference
     data_info : dict with training hyper-parameters (sr_target, hop_length,
                 n_fft, split ratios, scale_rir flag, …)
+    run_config: Full run_config dict (run_config['args'] holds all data params)
     """
-    print(f"  Loading diffusion model from:\n    {model_path}")
-    model, data_info = load_model_and_data_info(model_path, device, RIRDiffusionModel)
+    print(f"  Loading diffusion model from:\n    {model_dir}")
+    model, run_config = load_pretrained_model(model_dir, device)
+    data_info = data_params_from_run_config(run_config)
     print(f"  Native SR : {data_info['sr_target']} Hz | "
           f"scale_rir : {data_info.get('scale_rir', False)}")
-    return model, data_info
+    return model, data_info, run_config
 
 
 
@@ -233,9 +235,10 @@ def compute_metrics(clean: np.ndarray, reverb: np.ndarray, dereverb: np.ndarray)
 # SECTION 5 — Batched RIR generation with the diffusion model
 # =============================================================================
 
-def generate_rir_batch(model, conditions: torch.Tensor, data_info: dict, device: torch.device, guidance_scale: float, use_ddim: bool, num_inference_steps: int) -> list:
-    """
-    Generate a batch of RIR waveforms conditioned on room/position metadata.
+def generate_rir_batch(model, conditions: torch.Tensor, data_info: dict, device: torch.device,
+                       guidance_scale: float, use_ddim: bool, num_inference_steps: int,
+                       images=None) -> list:
+    """Generate a batch of RIR waveforms conditioned on room/position metadata.
 
     The diffusion model outputs spectrograms in the model's native sample rate
     (data_info['sr_target']).  This function converts them to waveforms and
@@ -250,7 +253,9 @@ def generate_rir_batch(model, conditions: torch.Tensor, data_info: dict, device:
     channels   = 2   # real + imaginary parts of the spectrogram
     shape      = (batch_size, channels, *model.sample_size)
 
-    gen_specs = model.generate(cond=conditions, shape=shape, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, verbose=False, use_ddim=use_ddim)
+    gen_specs = model.generate(cond=conditions, shape=shape, num_inference_steps=num_inference_steps,
+                               guidance_scale=guidance_scale, verbose=False, use_ddim=use_ddim,
+                               images=images)
 
     if torch.is_tensor(gen_specs):
         gen_specs = gen_specs.cpu().numpy()
@@ -299,16 +304,17 @@ def run_evaluation(model, data_info: dict, dereverb_model: DereverbModel, test_d
     all_real, all_gen, samples = [], [], []
 
     for batch in tqdm(test_dataloader, desc="Evaluating"):
-        rirs, room_dims, mic_locs, speaker_locs, rt60s = batch
+        batch = _normalize_batch_to_dict(batch)
+        rirs = batch['rir']
         batch_size = rirs.shape[0]
 
-        # --- Build condition tensor [B, 10]: room(3) + mic(3) + spk(3) + rt60(1) ---
-        conditions = torch.cat(
-            [room_dims, mic_locs, speaker_locs, rt60s.unsqueeze(1)], dim=1
-        ).float().to(device)
+        conditions = build_condition_tensor(batch, device)
 
         # --- Real RIR waveforms at the model's native sample rate ---------------
         real_waves_native = [rirs[i].cpu().numpy().squeeze() for i in range(batch_size)]
+
+        # --- Optional image conditioning ----------------------------------------
+        images = batch['images'].to(device) if 'images' in batch else None
 
         # --- Compute k-factors for amplitude un-scaling (if used in training) ---
         if scale_rir:
@@ -321,7 +327,9 @@ def run_evaluation(model, data_info: dict, dereverb_model: DereverbModel, test_d
             k_factors = None
 
         # --- Generate RIRs conditioned on the same metadata as the real ones ----
-        gen_waves_native = generate_rir_batch(model, conditions, data_info, device, guidance_scale, use_ddim, num_inference_steps)
+        gen_waves_native = generate_rir_batch(model, conditions, data_info, device,
+                                              guidance_scale, use_ddim, num_inference_steps,
+                                              images=images)
 
         # --- Un-scale generated RIRs if amplitude scaling was used in training --
         if scale_rir and k_factors is not None:
@@ -541,25 +549,6 @@ def save_results(real_agg: dict, gen_agg: dict, all_real: list, all_gen: list, s
 # SECTION 8 — Argument parsing and entry point
 # =============================================================================
 
-def resolve_diffusion_model_path(path_arg: str) -> str:
-    """
-    Expand diffusion_model_path to the actual .pth.tar checkpoint file.
-
-    Accepts:
-      (a) Full path to the .pth.tar file          → used as-is
-      (b) Full path to the run folder             → model_best.pth.tar appended
-      (c) Bare run folder name (e.g. Dec24_20-02-59_dsief07)
-          → expanded to <GEN_RIR_ROOT>/outputs/finished/<name>/model_best.pth.tar
-    """
-    p = Path(path_arg)
-    # Bare folder name (no path separators) → expand under project outputs
-    if not p.is_absolute() and len(p.parts) == 1:
-        p = GEN_RIR_ROOT / "outputs" / "finished" / path_arg
-    # If not pointing at a .tar file, assume it's a folder → append checkpoint name
-    if p.suffix != ".tar":
-        p = p / "model_best.pth.tar"
-    return str(p)
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -572,7 +561,6 @@ def parse_args():
     )
 
     # -- Data paths -----------------------------------------------------------
-    parser.add_argument("--gtu_path", type=str, default="/home/yuvalmad/datasets/GTU_rir/GTU_RIR.pickle.dat", help="Path to GTU_RIR.pickle.dat")
     parser.add_argument("--librispeech_path", type=str, default="/dsi/gannot-lab/gannot-lab1/datasets/LibriSpeech/LibriSpeech/Test", help="LibriSpeech test directory (will be searched recursively for .wav files)")
 
     # -- Model paths ----------------------------------------------------------
@@ -601,7 +589,7 @@ def parse_args():
     parser.add_argument("--debug_mode", type=str2bool, default=False, help="Debug mode: small n_samples/steps/batch for a fast sanity-check run")
 
     # -- Output ---------------------------------------------------------------
-    parser.add_argument("--save_path", type=str, default=None, help="Output directory (default: <diffusion_model_dir>/dereverb_eval_<timestamp>/)")
+    parser.add_argument("--save_path", type=str, default=None, help="Output directory (default: <diffusion_model_dir>/evaluation/dereverb_eval_<timestamp>/)")
 
     return parser.parse_args()
 
@@ -609,8 +597,8 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # ── Resolve diffusion model path ──────────────────────────────────────────
-    args.diffusion_model_path = resolve_diffusion_model_path(args.diffusion_model_path)
+    # ── Resolve model directory ───────────────────────────────────────────────
+    model_dir = resolve_model_dir(args.diffusion_model_path)
 
     # ── Debug mode ────────────────────────────────────────────────────────────
     if args.debug_mode:
@@ -631,7 +619,7 @@ def main():
 
     # ── Load models ───────────────────────────────────────────────────────────
     print("── Loading RIR diffusion model ─────────────────────────────────────────")
-    model, data_info = load_diffusion_model(args.diffusion_model_path, device)
+    model, data_info, run_config = load_diffusion_model(model_dir, device)
     args.num_inference_steps = args.num_inference_steps or model.n_timesteps
 
     # Warn if guidance is requested but model was not trained with CFG
@@ -648,22 +636,21 @@ def main():
         folder_name = f"dereverb_eval_{ts}_guidance{args.guidance_scale}_{dereverb_model.name}"
         if args.debug_mode:
             folder_name += "_DEBUG"
-        args.save_path = str(Path(args.diffusion_model_path).parent / folder_name)
+        args.save_path = str(model_dir / 'evaluation' / folder_name)
     save_path = Path(args.save_path)
     print(f"Output : {save_path}\n")
 
     # ── Load test dataset ─────────────────────────────────────────────────────
-    print("\n── Loading GTU test split ──────────────────────────────────────────────")
-    # Reproduce the exact held-out test rooms used during dereverberation training
-    # by using the same random seed and split ratios stored in data_info.
-    n_total = (
-        int(args.n_samples / data_info["test_ratio"]) if args.n_samples
-        else data_info["nSamples"]
+    # Reproduce the exact held-out test set used during training by reusing the
+    # same random seed and split ratios stored in run_config.
+    print("\n── Loading test split ──────────────────────────────────────────────────")
+    if args.n_samples is not None:
+        data_info = dict(data_info)
+        data_info['nSamples'] = int(args.n_samples / data_info["test_ratio"])
+    test_dataset, test_dataloader = build_test_dataloader(
+        data_info, args.batch_size, workers=4, run_config=run_config
     )
-    _, _, test_dataset = load_rir_dataset(name="gtu", path=args.gtu_path, split=True, mode="raw", hop_length=data_info["hop_length"], n_fft=data_info["n_fft"], use_spectrogram=data_info["use_spectrogram"], sample_max_sec=data_info["sample_max_sec"], nSamples=n_total, sr_target=data_info["sr_target"], train_ratio=data_info["train_ratio"], eval_ratio=data_info["eval_ratio"], test_ratio=data_info["test_ratio"], random_seed=data_info["random_seed"], split_by_room=data_info["split_by_room"])
     print(f"  Test set size : {len(test_dataset)} RIRs")
-
-    test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, drop_last=False, pin_memory=torch.cuda.is_available())
 
     # ── Load speech files ─────────────────────────────────────────────────────
     print("\n── Loading LibriSpeech speech files ────────────────────────────────────")

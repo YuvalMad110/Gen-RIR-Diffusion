@@ -42,6 +42,11 @@ CUDA_VISIBLE_DEVICES=3 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --datas
 CUDA_VISIBLE_DEVICES=3 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --dataset-name soundspaces --batch-size 4 --epochs 10 \
     --scenes office_2 room_0 apartment_0 \
 |& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
+
+CUDA_VISIBLE_DEVICES=1 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --dataset-name soundspaces --batch-size 8 |& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
+
+CUDA_VISIBLE_DEVICES=1 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --use-rt60-condition --dataset-name soundspaces --post-train-eval true
+python3 ./Projects/Gen-RIR-Diffusion/run_train.py --use-rt60-condition --post-train-eval true --image-root /dsi/gannot-lab/gannot-lab1/datasets/Replica_rendered/ --model-config /home/yuvalmad/Projects/Gen-RIR-Diffusion/config/model_config_VisualCond_HighRes.json
 """
 
 
@@ -71,7 +76,7 @@ def parse_args():
                         help='Append precomputed RT60 to the SoundSpaces condition vector (requires 10_precompute_rt60.py)')
 
     # Training configuration
-    parser.add_argument('--batch-size', type=int, default=16)
+    parser.add_argument('--batch-size', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--workers', type=int, default=10)
@@ -99,6 +104,10 @@ def parse_args():
     parser.add_argument('--split-by-room', type=str2bool, default=False,
                         help='Split by room ID to avoid data leakage (GTU only)')
     parser.add_argument('--random-seed', type=int, default=42)
+
+    # Post-training evaluation
+    parser.add_argument('--post-train-eval', type=str2bool, default=False,
+                        help='Run full_model_eval.py on the finished run directory after training completes')
 
     args = parser.parse_args()
     if args.data_path is None:
@@ -183,6 +192,20 @@ def get_sample_size(dataloader, n_fft, hop_length):
         n_freq = n_fft // 2 + 1
         n_frames = rir.shape[-1] // hop_length + 1
         return torch.Size([n_freq, n_frames])
+
+def _run_post_train_eval(model_dir: str, batch_size: int) -> None:
+    """Launch full_model_eval.py as a subprocess after training completes."""
+    import subprocess
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    eval_script = os.path.join(project_root, 'evaluation', 'full_model_eval.py')
+    cmd = [
+        'python3', eval_script,
+        '--model_dir', model_dir,
+        '--batch_size', str(batch_size),
+    ]
+    print(f"\n---------- Post-training evaluation: {' '.join(cmd)} ----------\n")
+    subprocess.run(cmd, check=False)
+
 
 # ------------------------- Main --------------------------
 def main():
@@ -307,6 +330,9 @@ def main():
             shutil.copy(args.room_overview_config, os.path.join(configs_dir, 'room_overview_config.json'))
 
         print('\n---------- Training finished successfully!! ----------\n')
+
+        if args.post_train_eval:
+            _run_post_train_eval(model_path, args.batch_size)
 
     # ---------- Distroy Process Group ----------
     # Wait for main process to finish saving files

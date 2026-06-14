@@ -173,6 +173,8 @@ def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_t
     ])
     if baseline_method:
         lines.append(f"Baseline method: {baseline_method}")
+        if data_info.get('dataset_name') == 'soundspaces':
+            lines.append("  NOTE: Baseline RT60 values were estimated from the reference RIRs (SoundSpaces condition vector does not include RT60).")
 
     lines.extend([
         "", "-" * 70, "DATA INFO (from training)", "-" * 70,

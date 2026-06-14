@@ -4,12 +4,10 @@ RIR Diffusion Model Evaluation Script
 
 Comprehensive evaluation of generated RIRs against ground truth on the test set.
 Computes acoustic metrics (T60, DRR, EDT, C50, LSD, EDC) and generates statistical reports.
-Supports both GTU and SoundSpaces+image-conditioned models (auto-detected from run_config.json).
 
 Usage:
-    CUDA_VISIBLE_DEVICES=3 python3 evaluation/full_model_eval.py --model_dir outputs/finished/May17_13-36-25_dsief07
-    python3 evaluation/full_model_eval.py --model_dir /path/to/run_dir --num_inference_steps 50 --use_ddim
-    CUDA_VISIBLE_DEVICES=2 python3 ./Projects/Gen-RIR-Diffusion/evaluation/full_model_eval.py --model_dir /home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/May28_18-24-47_dsief06
+    CUDA_VISIBLE_DEVICES=2 python3 ./Projects/Gen-RIR-Diffusion/full_model_eval.py --num_inference_steps 50 --use_ddim --nSamples 1000
+    python full_model_eval.py --model_path /path/to/model.pth.tar --guidance_scale 4.0 --batch_size 32
 """
 
 import argparse
@@ -27,13 +25,16 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+from RIRDiffusionModel import RIRDiffusionModel
+from data.rir_dataset import load_rir_dataset
 from utils.signal_proc import spectrogram_to_waveform, undo_rir_scaling, calculate_edc, estimate_decay_k_factor
 from utils.inference_data_loading import (
-    load_pretrained_model, data_params_from_run_config,
-    build_test_dataloader, build_condition_tensor, _normalize_batch_to_dict,
+    load_pretrained_model, load_model_and_data_info,
+    data_params_from_run_config, build_test_dataloader, build_condition_tensor,
+    _normalize_batch_to_dict,
 )
-from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_t60_batch
-from utils.misc import get_israel_time, resolve_model_dir
+from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths
+from utils.misc import get_israel_time
 from utils.evaluation import select_representative_samples
 from utils.evaluation_reporting import save_evaluation_summary, save_detailed_metrics_table, save_selected_samples
 from utils.visualization import (
@@ -105,9 +106,8 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signa
             # --- Generate baseline RIRs (synthetic) ---
             baseline_waveforms = None
             if use_baseline:
-                rt60_estimates = compute_t60_batch(real_waveforms, sr) if conditions_np.shape[1] <= 9 else None
                 baseline_waveforms = generate_synthetic_rirs_batch(
-                    conditions_np, sr, max_length_samples=None, method=args.baseline_method, verbose=False, rt60_estimates=rt60_estimates, dataset_name=data_info.get('dataset_name', 'gtu'))
+                    conditions_np, sr, max_length_samples=None, method=args.baseline_method, verbose=False)
 
             # --- Generate diffusion RIRs ---
             channels = 2  # Real + Imag for spectrogram
@@ -178,9 +178,13 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signa
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate RIR Diffusion Model on Test Set")
-    parser.add_argument("--model_dir", type=str,
-                        default='Dec24_20-02-59_dsief07',
-                        help="Run directory or bare folder name under outputs/finished/")
+    # Run specification — provide either --run_dir (modern) or --model_path (legacy GTU)
+    parser.add_argument("--run_dir", type=str, default=None,
+                        help="Path to run output directory (contains run_config.json + model_best.pth.tar)")
+    parser.add_argument("--model_path", type=str, help="Path to trained model checkpoint (legacy GTU only)",
+                        default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Dec24_20-02-59_dsief07/model_best.pth.tar')
+    parser.add_argument("--dataset_path", type=str, default='./datasets/GTU_rir/GTU_RIR.pickle.dat',
+                        help="Path to GTU dataset (legacy path; ignored when --run_dir is set)")
     parser.add_argument("--nSamples", type=int, default=None, help="Override test set size (None=use all)")
     parser.add_argument("--guidance_scale", type=float, default=2.0, help="CFG scale (1.0=no guidance)")
     parser.add_argument("--num_inference_steps", type=int, default=50, help="Denoising steps")
@@ -202,18 +206,14 @@ def parse_args():
 def main():
     args = parse_args()
 
-    model_dir = resolve_model_dir(args.model_dir)
-
     # Setup device
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {device}")
 
-    # ---------- Load model ----------
+    # ---------- Load model and data_info ----------
     print("\nLoading model...")
-    model, run_config = load_pretrained_model(model_dir, device)
-    data_info = data_params_from_run_config(run_config)
+    model, data_info = load_model_and_data_info(args.model_path, device, RIRDiffusionModel)
     args.num_inference_steps = args.num_inference_steps or model.n_timesteps
-    args.model_path = str(model_dir / 'model_best.pth.tar')  # for summary reporting
 
     # ---------- Load clean speech for reverbed LSD ----------
     print(f"\nLoading clean speech from: {args.speech_path}")
@@ -234,9 +234,10 @@ def main():
     # Calculate total nSamples from desired test set size
     # User specifies test set size, we back-calculate total: total = test_size / test_ratio
     if args.nSamples is not None:
-        data_info = dict(data_info)
-        data_info['nSamples'] = int(args.nSamples / data_info['test_ratio'])
-        print(f"Test set size requested: {args.nSamples} -> Total dataset size: {data_info['nSamples']}")
+        n_samples = int(args.nSamples / data_info['test_ratio'])
+        print(f"Test set size requested: {args.nSamples} -> Total dataset size: {n_samples}")
+    else:
+        n_samples = data_info['nSamples']
 
     # Check CFG
     if args.guidance_scale != 1.0 and not getattr(model, 'guidance_enabled', False):
@@ -248,17 +249,29 @@ def main():
         folder_name = f"evaluation_{get_israel_time()}"
         if getattr(model, 'guidance_enabled', False):
             folder_name += f"_guidance{args.guidance_scale}"
-        args.save_path = str(model_dir / 'evaluation' / folder_name)
+        args.save_path = os.path.join(os.path.dirname(args.model_path), folder_name)
     save_path = Path(args.save_path)
     save_path.mkdir(parents=True, exist_ok=True)
 
     # ---------- Load test dataset ----------
-    # For GTU: yields raw 5-tuple batches (no scaling); for SoundSpaces: yields dict batches with optional images
     print("\nLoading test dataset...")
-    test_dataset, test_dataloader = build_test_dataloader(
-        data_info, args.batch_size, args.workers, run_config=run_config
+    _, _, test_dataset = load_rir_dataset(
+        name='gtu', path=args.dataset_path, split=True, mode='raw',
+        hop_length=data_info['hop_length'], n_fft=data_info['n_fft'],
+        use_spectrogram=data_info['use_spectrogram'], sample_max_sec=data_info['sample_max_sec'],
+        nSamples=n_samples, sr_target=data_info['sr_target'],
+        train_ratio=data_info['train_ratio'], eval_ratio=data_info['eval_ratio'],
+        test_ratio=data_info['test_ratio'], random_seed=data_info['random_seed'],
+        split_by_room=data_info['split_by_room']
     )
     print(f"Test set size: {len(test_dataset)}")
+
+    # Create dataloader WITHOUT collate function to get raw unscaled waveforms
+    # We'll handle any needed transformations manually in evaluate_test_set
+    test_dataloader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers,
+        collate_fn=None, drop_last=False, pin_memory=torch.cuda.is_available()
+    )
 
     # ---------- Run evaluation ----------
     aggregate, all_metrics, all_samples, baseline_aggregate, baseline_all_metrics = evaluate_test_set(
@@ -293,7 +306,7 @@ def main():
     plot_all_histograms(all_metrics, save_path / 'histograms', baseline_all_metrics=baseline_all_metrics)
 
     # Plot selected representative samples (4 per metric)
-    model_name = model_dir.name
+    model_name = Path(args.model_path).parent.name
     for metric_name in selected_samples.keys():
         plot_selected_rir_samples(selected_samples, metric_name, data_info['sr_target'],
                                   model_name, args.num_inference_steps, model.n_timesteps, save_path)

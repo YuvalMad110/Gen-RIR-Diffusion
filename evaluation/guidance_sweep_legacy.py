@@ -30,11 +30,10 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+from RIRDiffusionModel import RIRDiffusionModel
+from data.rir_dataset import load_rir_dataset
 from utils.signal_proc import spectrogram_to_waveform, undo_rir_scaling, calculate_edc, estimate_decay_k_factor
-from utils.inference_data_loading import (
-    load_pretrained_model, data_params_from_run_config,
-    build_test_dataloader, build_condition_tensor, _normalize_batch_to_dict,
-)
+from utils.inference_data_loading import load_model_and_data_info
 from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_edc
 from utils.misc import get_israel_time
 import matplotlib.pyplot as plt
@@ -61,21 +60,18 @@ RANKING_METRICS = {
 def prepare_batch(batch, data_info, device):
     """Extract real waveforms, conditions, and k_factors from a dataloader batch.
 
-    Handles both GTU tuple batches and SoundSpaces dict batches.
-
     Returns:
         real_waveforms: list of 1D numpy arrays
-        conditions: torch tensor [B, 9] or [B, 10] on device
+        conditions: torch tensor [B, 10] on device
         k_factors: torch tensor [B] or None (if no scaling)
     """
-    batch = _normalize_batch_to_dict(batch)
-    rirs = batch['rir']
+    rirs, room_dims, mic_locs, speaker_locs, rt60s = batch
     batch_size = rirs.shape[0]
 
     real_waveforms = [rirs[i].cpu().numpy().squeeze() if torch.is_tensor(rirs[i]) else rirs[i].squeeze()
                       for i in range(batch_size)]
 
-    conditions = build_condition_tensor(batch, device)
+    conditions = torch.cat([room_dims, mic_locs, speaker_locs, rt60s.unsqueeze(1)], dim=1).float().to(device)
 
     k_factors = None
     if data_info.get('scale_rir', False):
@@ -87,7 +83,7 @@ def prepare_batch(batch, data_info, device):
 
 
 def generate_for_scale(model, conditions, guidance_scale, sample_size, data_info,
-                       num_inference_steps, use_ddim, k_factors=None, images=None):
+                       num_inference_steps, use_ddim, k_factors=None):
     """Generate RIRs for one guidance scale and return waveforms.
 
     Returns:
@@ -98,7 +94,7 @@ def generate_for_scale(model, conditions, guidance_scale, sample_size, data_info
 
     generated_specs = model.generate(
         cond=conditions, shape=shape, num_inference_steps=num_inference_steps,
-        guidance_scale=guidance_scale, verbose=False, use_ddim=use_ddim, images=images)
+        guidance_scale=guidance_scale, verbose=False, use_ddim=use_ddim)
 
     if torch.is_tensor(generated_specs):
         generated_specs = generated_specs.cpu().numpy()
@@ -201,9 +197,6 @@ def regenerate_selected(model, test_dataset, sample_indices, top_scales, data_in
     batch = default_collate([test_dataset[i] for i in sample_indices])
     real_waveforms, conditions, k_factors = prepare_batch(batch, data_info, device)
 
-    batch_dict = _normalize_batch_to_dict(batch)
-    images = batch_dict['images'].to(device) if 'images' in batch_dict else None
-
     ref_waveforms = {idx: real_waveforms[j] for j, idx in enumerate(sample_indices)}
     gen_waveforms = {}
 
@@ -211,7 +204,7 @@ def regenerate_selected(model, test_dataset, sample_indices, top_scales, data_in
         for scale in top_scales:
             gen_wavs = generate_for_scale(
                 model, conditions, scale, sample_size, data_info,
-                num_inference_steps, use_ddim, k_factors, images=images)
+                num_inference_steps, use_ddim, k_factors)
             for j, idx in enumerate(sample_indices):
                 gen_waveforms[(idx, scale)] = gen_wavs[j]
 
@@ -419,6 +412,7 @@ def format_summary(scales, metric_keys, avg_score_table, avg_rank_table, n_sampl
     lines.append("CONFIGURATION")
     lines.append("=" * 80)
     lines.append(f"Model: {args.model_path}")
+    lines.append(f"Dataset: {args.dataset_path}")
     lines.append(f"Scheduler: {'DDIM' if args.use_ddim else 'DDPM'}")
     lines.append(f"Inference steps: {args.num_inference_steps}")
     lines.append(f"Batch size: {args.batch_size}")
@@ -467,9 +461,8 @@ def save_csvs(save_path, scales, metric_keys, avg_score_table, avg_rank_table, r
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Guidance Scale Sweep Evaluation")
-    parser.add_argument("--model_dir", type=str,
-                        default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Dec24_20-02-59_dsief07',
-                        help="Path to run output directory (contains run_config.json + model_best.pth.tar)")
+    parser.add_argument("--model_path", type=str, default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/outputs/finished/Dec24_20-02-59_dsief07/model_best.pth.tar')
+    parser.add_argument("--dataset_path", type=str, default='./datasets/GTU_rir/GTU_RIR.pickle.dat')
     parser.add_argument("--nSamples", type=int, default=None)
     parser.add_argument("--num_inference_steps", type=int, default=50)
     parser.add_argument("--use_ddim", action="store_true")
@@ -494,7 +487,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    model_dir = Path(args.model_dir)
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
 
     # Build list of scales
@@ -509,10 +501,8 @@ def main():
 
     # Load model
     print("Loading model...")
-    model, run_config = load_pretrained_model(model_dir, device)
-    data_info = data_params_from_run_config(run_config)
+    model, data_info = load_model_and_data_info(args.model_path, device, RIRDiffusionModel)
     args.num_inference_steps = args.num_inference_steps or model.n_timesteps
-    args.model_path = str(model_dir / 'model_best.pth.tar')  # for summary reporting
 
     assert getattr(model, 'guidance_enabled', False), \
         "Model was not trained with CFG — guidance sweep requires a CFG-trained model."
@@ -535,22 +525,31 @@ def main():
     torch.manual_seed(data_info['random_seed'])
     np.random.seed(data_info['random_seed'])
 
-    # Override nSamples if requested
-    if args.nSamples is not None:
-        data_info = dict(data_info)
-        data_info['nSamples'] = int(args.nSamples / data_info['test_ratio'])
-
     # Dataset
-    test_dataset, test_dataloader = build_test_dataloader(
-        data_info, args.batch_size, args.workers, run_config=run_config
-    )
+    if args.nSamples is not None:
+        n_samples = int(args.nSamples / data_info['test_ratio'])
+    else:
+        n_samples = data_info['nSamples']
+
+    _, _, test_dataset = load_rir_dataset(
+        name='gtu', path=args.dataset_path, split=True, mode='raw',
+        hop_length=data_info['hop_length'], n_fft=data_info['n_fft'],
+        use_spectrogram=data_info['use_spectrogram'], sample_max_sec=data_info['sample_max_sec'],
+        nSamples=n_samples, sr_target=data_info['sr_target'],
+        train_ratio=data_info['train_ratio'], eval_ratio=data_info['eval_ratio'],
+        test_ratio=data_info['test_ratio'], random_seed=data_info['random_seed'],
+        split_by_room=data_info['split_by_room'])
+
+    test_dataloader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers,
+        collate_fn=None, drop_last=False, pin_memory=torch.cuda.is_available())
 
     # Output directory
     folder_name = f"guidance_sweep_{get_israel_time()}"
-    save_path = model_dir / 'evaluation' / folder_name
+    save_path = Path(os.path.dirname(args.model_path)) / folder_name
     save_path.mkdir(parents=True, exist_ok=True)
 
-    sample_size = tuple(model.sample_size)
+    sample_size = tuple(data_info['sample_size'])
     sr = data_info['sr_target']
     octave_bands = [125, 250, 500, 1000, 2000, 4000]
 
@@ -564,13 +563,11 @@ def main():
     with torch.no_grad():
         for batch in tqdm(test_dataloader, desc="Sweep"):
             real_waveforms, conditions, k_factors = prepare_batch(batch, data_info, device)
-            batch_dict = _normalize_batch_to_dict(batch)
-            images = batch_dict['images'].to(device) if 'images' in batch_dict else None
 
             for scale in scales:
                 gen_waveforms = generate_for_scale(
                     model, conditions, scale, sample_size, data_info,
-                    args.num_inference_steps, args.use_ddim, k_factors, images=images)
+                    args.num_inference_steps, args.use_ddim, k_factors)
 
                 for i in range(len(real_waveforms)):
                     rir_gen, rir_ref = align_rir_lengths(gen_waveforms[i], real_waveforms[i], mode='truncate')

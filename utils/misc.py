@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import torch
 import yaml
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 import pytz
 import numpy as np
 import re
@@ -204,6 +205,21 @@ def extract_losses_from_log(log_path):
         content = f.read()
     losses = [float(match) for match in re.findall(r"Loss:\s+([0-9.]+)", content)]
     return losses
+
+def resolve_model_dir(path_arg: str) -> Path:
+    """Resolve a model path argument to the full run directory (containing run_config.json).
+
+    Accepts:
+      (a) Full/relative path to the run folder  → returned as Path as-is
+      (b) Bare folder name (e.g. 'Dec24_20-02-59_dsief07')
+          → expanded to <project_root>/outputs/finished/<name>/
+    """
+    p = Path(path_arg)
+    if not p.is_absolute() and len(p.parts) == 1:
+        project_root = Path(__file__).parent.parent
+        p = project_root / "outputs" / "finished" / path_arg
+    return p
+
 
 def get_israel_time(fmt="%Y-%m-%d_%H-%M-%S"):
     """Get current time in Israel timezone as formatted string.
