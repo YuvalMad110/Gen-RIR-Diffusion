@@ -1,0 +1,10 @@
+{
+  "office_0":        ["mid_corner1", "top_corner4"],
+  "office_1":        ["mid_corner4", "top_corner1"],
+  "office_2":        ["mid_corner1", "top_corner4"],
+  "office_3":        ["top_corner3", "mid_corner2"],
+  "office_4":        ["mid_corner3", "top_corner2"],
+  "hotel_0":         ["top_corner1", "mid_corner4"],
+  "frl_apartment_0": ["top_corner1", "top_corner3"],
+  "frl_apartment_1": ["top_corner3", "top_corner4"]
+}

@@ -18,7 +18,7 @@
     "last_n": 4,
     "layer_combination": "fuse",
     "spatial_pool_factor": null,
-    "image_size": [56, 74]
+    "image_size": [392, 518]
   },
   "_Note": "Every top-level key starting with '_' is for documentation purposes and is not used in the code.",
   "_image_size_ideal": "For optimal perfomance, it's advised to use [392, 518], however this might be too heavy"

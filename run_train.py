@@ -18,7 +18,7 @@ from diffusers import DDPMScheduler
 from trainer import DiffusionTrainer
 from utils.epoch_subset_sampler import EpochSubsetSampler
 
-_DEFAULT_CFG     = '/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/model_config_cond_encoder_cfg.json'
+_DEFAULT_CFG     = '/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/model_config_VisualCond.json'
 _DEFAULT_SS_ROOT = '/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica/'
 
 """
@@ -51,12 +51,18 @@ def parse_args():
                         help='Path to model config JSON. Use model_config_VisualCond.json for image conditioning.')
 
     # Dataset selection
-    parser.add_argument('--dataset-name', type=str, default='gtu', choices=['gtu', 'soundspaces'],
+    parser.add_argument('--dataset-name', type=str, default='soundspaces', choices=['gtu', 'soundspaces'],
                         help='Dataset to train on. Defaults: gtu→GTU pickle, soundspaces→server RIR root')
     parser.add_argument('--data-path', type=str, default=None,
                         help='Dataset path. Defaults to GTU pickle or SoundSpaces RIR root based on --dataset-name')
     parser.add_argument('--image-root', type=str, default=None,
-                        help='Rendered RGB image root (target2source_rgb/); omit to disable image conditioning')
+                        help='Replica_rendered/ root; omit to disable image conditioning')
+    parser.add_argument('--rir-view-type', type=str, default='rgb', choices=['rgb', 'depth', 'none'],
+                        help="Per-pair image type: 'rgb', 'depth', or 'none' to disable")
+    parser.add_argument('--room-overview-type', type=str, default='rgb', choices=['rgb', 'depth', 'none'],
+                        help="Sensor type for scene-level overview images; 'none' to disable")
+    parser.add_argument('--room-overview-config', type=str, help='Path to JSON mapping scene → [corner_names]',
+                        default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/room_overviews/2views_top_mid_small_scenes.json')
     parser.add_argument('--scenes', type=str, nargs='+', default=None,
                         help='Restrict SoundSpaces to specific scenes (default: all 18)')
 
