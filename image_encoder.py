@@ -69,8 +69,8 @@ _PYRAMID_LAYERS = {
 
 # HuggingFace model IDs
 _MODEL_IDS = {
-    'large': 'depth-anything/depth-anything-v3-large-hf',
-    'base':  'depth-anything/depth-anything-v3-small-hf',
+    'large': 'depth-anything/Depth-Anything-V2-Large-hf',
+    'base':  'depth-anything/Depth-Anything-V2-Base-hf',
 }
 
 # Default image size: (H, W) divisible by patch size 14 with ~4:3 aspect ratio.
@@ -127,8 +127,8 @@ class ImageEncoder(nn.Module):
         n_layers  = _VIT_N_LAYERS[model_variant]
 
         # ── backbone ──────────────────────────────────────────────────────────
-        from transformers import AutoModel
-        da3 = AutoModel.from_pretrained(_MODEL_IDS[model_variant])
+        from transformers import AutoModelForDepthEstimation
+        da3 = AutoModelForDepthEstimation.from_pretrained(_MODEL_IDS[model_variant])
         self.backbone = da3.backbone        # Dinov2Model
         for p in self.backbone.parameters():
             p.requires_grad_(False)
