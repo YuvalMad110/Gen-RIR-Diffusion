@@ -178,7 +178,7 @@ All scripts use these default paths (override via CLI arguments):
 Install the image encoder backbone (DA3 ViT-L, auto-downloads weights from HuggingFace on first use):
 
 ```bash
-python3 -m pip install depth-anything-3
+python3 -m pip install transformers  # provides Depth Anything V2 via HuggingFace
 ```
 
 ---

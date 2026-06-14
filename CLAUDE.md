@@ -17,9 +17,11 @@ Add visual room image conditioning to the diffusion model using SoundSpaces RIRs
 - [x] **Step 9** — SoundSpaces dataset class (`data/soundspaces_replica.py`) + collate (`data/dataset_collate_fn.py`) + split util (`utils/dataset_utils.py`)
 - [x] **Step 10** — Image encoder: DA3 ViT-L backbone, pyramid features, fuse/stack modes (`image_encoder.py`); design doc at `docs/image_conditioning_design.md`
 - [x] **Step 11** — Image conditioning in model: `FusionBlock`, `image_encoder` param, updated `forward`/`generate`/`get_null_conditioning` (`RIRDiffusionModel.py`); trainer dict-batch unpacking (`trainer.py`); `run_train.py` SoundSpaces support + `model_config_VisualCond.json`
-- [ ] **Step 12** — Multi-image fetching: `rir_view_type` + `room_overview_types` in dataset (plan written)
+- [x] **Step 12** — Multi-image fetching: `rir_view_type` + `room_overview_types` in `data/soundspaces_replica.py`; depth loading is placeholder (repeat 3×) — see Step 15
 - [ ] **Step 13** — First training run (scalar-only SoundSpaces baseline, then with images)
 - [ ] **Step 14** — Encoding strategy: flat vs. separate encoders for pair-view vs. scene-overview images; `out_dim` ablation (128 → 256/512)
+- [ ] **Step 15** — Proper depth input handling in `ImageEncoder`: learned `Conv2d(1, 3, kernel_size=1)` input projection before backbone (Option A); current repeat-3× in `_load_depth` is a placeholder
+- [x] **Step 16** — Add `--use_rt60_condition` flag for SoundSpaces training: estimate RT60 from each RIR at dataset load time and append it to the 9-dim condition vector, making it 10-dim and matching GTU's format.
 
 ## Key Paths
 - SoundSpaces metadata: `/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/metadata/replica/`
