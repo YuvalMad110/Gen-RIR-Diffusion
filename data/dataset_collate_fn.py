@@ -22,7 +22,7 @@ def scale_and_spectrogram_collate_fn(sr: float,
         'room_dim'    — [B, 3]
         'mic_loc'     — [B, 3]
         'speaker_loc' — [B, 3]
-        'rt60'        — [B]              (GTU only)
+        'rt60'        — [B]              (GTU always; SoundSpaces when use_rt60=True)
         'images'      — [B, N, 3, H, W]  (SoundSpaces only, when images are present)
                         N = number of images per RIR sample. Currently N=1
                         (one receiver→source RGB per pair); the design supports
@@ -70,11 +70,17 @@ def scale_and_spectrogram_collate_fn(sr: float,
         }
 
     def soundspaces_collate(batch: List[Tuple]) -> dict:
-        rirs, room_dims, mic_locs, speaker_locs, images = zip(*batch)
+        if len(batch[0]) == 6:
+            rirs, room_dims, mic_locs, speaker_locs, images, rt60s = zip(*batch)
+        else:
+            rirs, room_dims, mic_locs, speaker_locs, images = zip(*batch)
+            rt60s = None
         d = {
             'rir': _process_rirs(rirs),
             **_stack_locs(room_dims, mic_locs, speaker_locs),
         }
+        if rt60s is not None:
+            d['rt60'] = torch.tensor(rt60s, dtype=torch.float32)
         # Images may be None when image_root is not set or a file is missing
         if images[0] is not None:
             d['images'] = torch.stack(images)   # [B, N, 3, H, W]

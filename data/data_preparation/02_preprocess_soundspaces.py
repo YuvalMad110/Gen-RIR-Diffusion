@@ -52,6 +52,7 @@ CSV_COLUMNS = [
     "source_x", "source_y", "source_z",
     "distance_m",     # Euclidean 3D distance between receiver and source (meters)
     "rir_path",       # relative path: [scene]/[best_angle]/[receiver]_[source].wav
+    "valid",          # True if WAV file exists and is non-empty; False otherwise
 ]
 
 
@@ -142,8 +143,9 @@ def process_scene(
     graph_nodes = sorted(graph.nodes())
 
     rows = []
-    n_missing = 0
     n_self_pairs = 0
+    n_valid = 0
+    n_invalid = 0
 
     for receiver_idx in graph_nodes:
         for source_idx in graph_nodes:
@@ -160,12 +162,9 @@ def process_scene(
             best_angle = select_best_angle(bearing)
             best_channel = select_best_channel(bearing, best_angle)
 
-            # Verify RIR file exists
             rir_rel = f"{scene_name}/{best_angle}/{receiver_idx}_{source_idx}.wav"
             rir_abs = rir_root / scene_name / str(best_angle) / f"{receiver_idx}_{source_idx}.wav"
-            if not rir_abs.exists():
-                n_missing += 1
-                continue
+            valid = rir_abs.exists() and rir_abs.stat().st_size > 0
 
             distance = math.dist((rx, ry, rz), (sx, sy, sz))
 
@@ -180,14 +179,21 @@ def process_scene(
                 "source_x": sx, "source_y": sy, "source_z": sz,
                 "distance_m": round(distance, 4),
                 "rir_path": rir_rel,
+                "valid": valid,
             })
+
+            if valid:
+                n_valid += 1
+            else:
+                n_invalid += 1
 
     stats = {
         "scene": scene_name,
         "n_graph_nodes": len(graph_nodes),
         "n_pairs_written": len(rows),
+        "n_valid": n_valid,
+        "n_invalid": n_invalid,
         "n_self_pairs_skipped": n_self_pairs,
-        "n_missing_rirs": n_missing,
     }
     return rows, stats
 
@@ -246,8 +252,7 @@ def main():
         all_rows.extend(rows)
         all_stats.append(stats)
         print(
-            f"{stats['n_pairs_written']} pairs"
-            + (f" | {stats['n_missing_rirs']} missing RIRs" if stats["n_missing_rirs"] else "")
+            f"{stats['n_valid']} valid / {stats['n_invalid']} invalid"
             + (f" | {stats['n_self_pairs_skipped']} self-pairs skipped" if stats["n_self_pairs_skipped"] else "")
         )
 
@@ -256,7 +261,6 @@ def main():
     output_file = args.output_dir / "soundspaces_replica_mapping.csv"
 
     with open(output_file, "w", newline="") as f:
-        # File header comment
         f.write(f"# SoundSpaces Replica — Mono-RIR Mapping\n")
         f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"# Metadata root: {args.metadata_root}\n")
@@ -272,6 +276,7 @@ def main():
         f.write("#   best_channel : 0=left ear, 1=right ear (ear physically closer to source)\n")
         f.write("#   distance_m   : Euclidean 3D distance receiver<->source in meters\n")
         f.write("#   rir_path     : relative path to the WAV file within the RIR root\n")
+        f.write("#   valid        : True if WAV exists and is non-empty; False otherwise\n")
         f.write("#\n")
         f.write("# IMPORTANT: bearing_deg=0 aligns with SoundSpaces heading=0 (−Y in points.txt).\n")
         f.write("# Verify this assumption visually when rendering images with 03_render_replica_images.py.\n")
@@ -281,26 +286,53 @@ def main():
         writer.writeheader()
         writer.writerows(all_rows)
 
-    # Print summary
     total_pairs = sum(s["n_pairs_written"] for s in all_stats)
-    total_missing = sum(s["n_missing_rirs"] for s in all_stats)
-    print(f"\nTotal pairs written: {total_pairs:,}")
-    if total_missing:
-        print(f"WARNING: {total_missing} RIR files not found — check paths")
+    total_valid  = sum(s["n_valid"]  for s in all_stats)
+    total_invalid = sum(s["n_invalid"] for s in all_stats)
+    print(f"\nTotal pairs: {total_pairs:,}  ({total_valid:,} valid, {total_invalid:,} invalid)")
     print(f"Mapping saved to: {output_file}")
 
-    # Print angle distribution
+    # Print angle distribution (valid rows only)
     angle_counts = {0: 0, 90: 0, 180: 0, 270: 0}
     channel_counts = {0: 0, 1: 0}
     for row in all_rows:
-        angle_counts[row["best_angle"]] += 1
-        channel_counts[row["best_channel"]] += 1
-    print(f"\nAngle distribution (should be ~25% each if positions are spread evenly):")
+        if row["valid"]:
+            angle_counts[row["best_angle"]] += 1
+            channel_counts[row["best_channel"]] += 1
+    print(f"\nAngle distribution (valid pairs only, should be ~25% each):")
     for a, c in angle_counts.items():
-        print(f"  angle={a:>3}°: {c:>7,}  ({100*c/total_pairs:.1f}%)")
+        print(f"  angle={a:>3}°: {c:>7,}  ({100*c/total_valid:.1f}%)")
     print(f"Channel distribution:")
-    print(f"  left  (0): {channel_counts[0]:>7,}  ({100*channel_counts[0]/total_pairs:.1f}%)")
-    print(f"  right (1): {channel_counts[1]:>7,}  ({100*channel_counts[1]/total_pairs:.1f}%)")
+    print(f"  left  (0): {channel_counts[0]:>7,}  ({100*channel_counts[0]/total_valid:.1f}%)")
+    print(f"  right (1): {channel_counts[1]:>7,}  ({100*channel_counts[1]/total_valid:.1f}%)")
+
+    # Write per-scene stats file
+    stats_file = args.output_dir / "data_analysis" / "soundspaces_scene_stats.txt"
+    stats_file.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "SoundSpaces/Replica — RIR pairs per scene",
+        "==========================================",
+        f"{'Scene':<28} {'Valid':>8} {'Invalid':>8} {'Total':>8}",
+        "-" * 56,
+    ]
+    for s in all_stats:
+        lines.append(
+            f"{s['scene']:<28} {s['n_valid']:>8,} {s['n_invalid']:>8,} {s['n_pairs_written']:>8,}"
+        )
+    lines += [
+        "-" * 56,
+        f"{'TOTAL':<28} {total_valid:>8,} {total_invalid:>8,} {total_pairs:>8,}",
+        "",
+        "GTU dataset: 15,202 samples (single pickle, in-memory)",
+        "",
+        "Notes:",
+        "  - Each pair = one (receiver, source) directed RIR",
+        "  - Invalid = WAV file missing or empty (0 bytes)",
+        "  - SoundSpaces samples all positions at a fixed ear height (~1.5m above floor)",
+        "  - All 18 scenes are single-floor in the acoustic data",
+    ]
+    stats_file.write_text("\n".join(lines) + "\n")
+    print(f"Scene stats saved to: {stats_file}")
 
 
 if __name__ == "__main__":

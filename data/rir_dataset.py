@@ -77,6 +77,7 @@ def load_rir_dataset(name, path=None, split=True, nSamples=None,
             test_ratio=test_ratio,
             random_seed=random_seed,
             sample_max_sec=sample_max_sec,
+            use_rt60=use_rt60,
             **kwargs,
         )
     else:

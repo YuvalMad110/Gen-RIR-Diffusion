@@ -99,14 +99,22 @@ class SoundSpacesReplicaDataset(Dataset):
     Dataset of (RIR, conditioning) pairs from SoundSpaces/Replica.
 
     Each sample returns a 5-tuple:
-        (rir, room_dim, mic_loc, speaker_loc, image)
+        (rir, room_dim, mic_loc, speaker_loc, images)
+
+    or a 6-tuple when use_rt60=True:
+        (rir, room_dim, mic_loc, speaker_loc, images, rt60)
 
     where:
-        rir         — torch.Tensor [1, T]          mono RIR at 44.1 kHz
-        room_dim    — np.array     [L_m, W_m, H_m] long axis, short axis, height
-        mic_loc     — np.array     [u, v, z_norm]  receiver in room-aligned coords
-        speaker_loc — np.array     [u, v, z_norm]  source in room-aligned coords
-        image       — torch.Tensor [1, 3, H, W]    ImageNet-normalised RGB, or None
+        rir         — torch.Tensor [1, T]              mono RIR at 44.1 kHz
+        room_dim    — np.array     [L_m, W_m, H_m]     long axis, short axis, height
+        mic_loc     — np.array     [u, v, z_norm]       receiver in room-aligned coords
+        speaker_loc — np.array     [u, v, z_norm]       source in room-aligned coords
+        images      — torch.Tensor [N_img, 3, H, W]    stacked images, or None
+        rt60        — float                             RT60 in seconds (6-tuple only)
+
+    N_img = (1 if rir_view_type is not None else 0) + corners_per_scene.
+    All images are [3, H, W] float32 — RGB is ImageNet-normalised, depth is
+    normalised to [0, 1] and repeated 3× to match shape.
 
     Positions are expressed in room-aligned metres:
         u      = metres along the long room axis
@@ -114,8 +122,8 @@ class SoundSpacesReplicaDataset(Dataset):
         z_norm = height above floor (floor = 0)
 
     Args:
-        mapping_csv:   path to soundspaces_replica_mapping.csv
-        geometry_csv:  path to room_geometry.csv
+        mapping_csv:          path to soundspaces_replica_mapping.csv
+        geometry_csv:         path to room_geometry.csv
         rir_root:             root directory of SoundSpaces binaural RIRs
         image_root:           Replica_rendered/ root, or None to omit all images
         rir_view_type:        per-pair image type: 'rgb', 'depth', or None
@@ -123,10 +131,13 @@ class SoundSpacesReplicaDataset(Dataset):
         room_overview_config: path to JSON mapping scene → [corner_names] (sensor-agnostic),
                               e.g. {"office_2": ["top_corner1", "mid_corner3"]}
         scenes:               optional list of scene names to restrict the dataset
-        split_name:    'train', 'eval', or 'test' — set by factory, not by user
-        sample_max_sec: maximum RIR length in seconds (default 2)
-        sr_target:     resample RIRs to this rate; None keeps original 44.1 kHz
-        image_size:    (H, W) to resize images to (default (392, 518))
+        split_name:           'train', 'eval', or 'test' — set by factory, not by user
+        sample_max_sec:       maximum RIR length in seconds (default 2)
+        sr_target:            resample RIRs to this rate; None keeps original 44.1 kHz
+        image_size:           (H, W) to resize images to (default (392, 518))
+        use_rt60:             if True, read the precomputed 'rt60' column from mapping_csv
+                              and return it as the 6th element of the sample tuple.
+                              Requires 10_precompute_rt60.py to have been run first.
     """
 
     def __init__(self,
@@ -138,13 +149,14 @@ class SoundSpacesReplicaDataset(Dataset):
                  room_overview_type:   str        = None,
                  room_overview_config: str        = None,
                  scenes:               list       = None,
-                 split_name:    str   = None,
-                 sample_max_sec: float = _MAX_SEC,
-                 sr_target:     int   = None,
-                 image_size:    tuple = _DEFAULT_IMAGE_SIZE):
+                 split_name:           str        = None,
+                 sample_max_sec:       float      = _MAX_SEC,
+                 sr_target:            int        = None,
+                 image_size:           tuple      = _DEFAULT_IMAGE_SIZE,
+                 use_rt60:             bool       = False):
 
-        self.rir_root       = rir_root
-        self.image_root     = image_root
+        self.rir_root             = rir_root
+        self.image_root           = image_root
         self.rir_view_type        = rir_view_type
         self.room_overview_type   = room_overview_type
         self.sample_max_sec       = sample_max_sec
@@ -152,6 +164,9 @@ class SoundSpacesReplicaDataset(Dataset):
         self.sr_target            = sr_target if sr_target else _SR
         self.split_name           = split_name
         self._image_size          = image_size
+        self.image_transform      = _make_image_transform(image_size)
+        self.use_rt60             = use_rt60
+
         self._scene_overview_map = {}
         if room_overview_config is not None:
             with open(room_overview_config) as f:
@@ -159,6 +174,10 @@ class SoundSpacesReplicaDataset(Dataset):
 
         # Load mapping (skip comment lines starting with #)
         self.mapping = pd.read_csv(mapping_csv, comment='#')
+        self.mapping = self.mapping[self.mapping['valid'] == True].reset_index(drop=True)
+        if use_rt60:
+            assert 'rt60' in self.mapping.columns, "'rt60' column missing — run 10_precompute_rt60.py first."
+            self.mapping = self.mapping[self.mapping['rt60'].notna()].reset_index(drop=True)
         if scenes is not None:
             self.mapping = self.mapping[self.mapping['scene'].isin(scenes)].reset_index(drop=True)
 
@@ -200,6 +219,8 @@ class SoundSpacesReplicaDataset(Dataset):
         images = self._load_images(row)
 
         out = (rir, room_dim, mic_loc, speaker_loc, images)
+        if self.use_rt60:
+            out += (float(row['rt60']),)
         return out
 
     # ------------------------------------------------------------------
@@ -257,6 +278,7 @@ def create_soundspaces_datasets(mapping_csv=_DEFAULT_MAPPING_CSV,
                                 split=True,
                                 train_ratio=0.7, eval_ratio=0.15, test_ratio=0.15,
                                 random_seed=42,
+                                use_rt60=False,
                                 **dataset_kwargs):
     """
     Factory for SoundSpacesReplicaDataset with scene-level train/eval/test splits.

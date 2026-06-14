@@ -65,6 +65,8 @@ def parse_args():
                         default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/room_overviews/2views_top_mid_small_scenes.json')
     parser.add_argument('--scenes', type=str, nargs='+', default=None,
                         help='Restrict SoundSpaces to specific scenes (default: all 18)')
+    parser.add_argument('--use-rt60-condition', action='store_true',
+                        help='Append precomputed RT60 to the SoundSpaces condition vector (requires 10_precompute_rt60.py)')
 
     # Training configuration
     parser.add_argument('--batch-size', type=int, default=16)
@@ -101,14 +103,26 @@ def parse_args():
         args.data_path = get_datasets_folder() if args.dataset_name == 'gtu' else _DEFAULT_SS_ROOT
     return args
 
-def load_model_config(config_path):
-    """Load model configuration from JSON file."""
+def load_model_config(config_path, dataset_name, use_rt60_condition=False):
+    """Load and prepare model config. Returns (model_config, ie_config).
+
+    Pops image_encoder_config into ie_config and converts image_size to tuple.
+    """
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Model configuration file not found: {config_path}")
-    
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    return config
+    with open(config_path) as f:
+        model_config = json.load(f)
+    # Strip comment keys (any key starting with "_" is treated as a comment)
+    model_config = {k: v for k, v in model_config.items() if not k.startswith('_')}
+    # input_cond_dim: SoundSpaces is 9-dim (no RT60) unless --use-rt60-condition adds it; GTU is always 10-dim
+    if dataset_name == 'soundspaces':
+        model_config['input_cond_dim'] = 10 if use_rt60_condition else 9
+    else:
+        model_config['input_cond_dim'] = 10
+    ie_config = model_config.pop('image_encoder_config', None)
+    if ie_config and 'image_size' in ie_config:
+        ie_config['image_size'] = tuple(ie_config['image_size'])
+    return model_config, ie_config
 
 def num_workers_test(dataset, nWorkers=[0,1,4,8,10, 12, 14, 16,18], batch_size=16):
     """
@@ -181,7 +195,10 @@ def main():
         args.epochs = 2
         args.nSamples = 14
         args.split_by_room = False
-        
+
+    # ---------- Model config ----------
+    model_config, ie_config = load_model_config(args.model_config, args.dataset_name, args.use_rt60_condition)
+
     # ---------- Load datasets ----------
     print("\n----------- Loading datasets... -----------\n")
     if args.dataset_name == 'gtu':
@@ -193,10 +210,17 @@ def main():
             random_seed=args.random_seed, split_by_room=args.split_by_room,
         )
     else:  # soundspaces
+        rir_view_type      = None if args.rir_view_type      == 'none' else args.rir_view_type
+        room_overview_type = None if args.room_overview_type == 'none' else args.room_overview_type
+        image_size = ie_config.get('image_size') if ie_config else None
         train_dataset, eval_dataset, test_dataset = load_rir_dataset(
             name='soundspaces', rir_root=args.data_path, image_root=args.image_root,
+            rir_view_type=rir_view_type, image_size=image_size,
+            room_overview_type=room_overview_type,
+            room_overview_config=args.room_overview_config,
+            sample_max_sec=args.sample_max_sec, sr_target=args.sr_target,
             scenes=args.scenes, train_ratio=args.train_ratio, eval_ratio=args.eval_ratio,
-            test_ratio=args.test_ratio, random_seed=args.random_seed,
+            test_ratio=args.test_ratio, random_seed=args.random_seed, use_rt60=args.use_rt60_condition,
         )
 
     print(f"Dataset splits: {len(train_dataset)} - {len(eval_dataset)} - {len(test_dataset)}")
@@ -218,21 +242,11 @@ def main():
 
 
     # ---------- Model ----------
-    with open(args.model_config, 'r') as f:
-        model_config = json.load(f)
-
-    # input_cond_dim is always derived from dataset: SoundSpaces has no RT60 (9-dim), GTU has RT60 (10-dim)
-    model_config['input_cond_dim'] = 9 if args.dataset_name == 'soundspaces' else 10
-
-    # Image encoder architecture config lives in JSON; pop it before passing **model_config to the model
-    ie_config = model_config.pop('image_encoder_config', None)
-
     # Build ImageEncoder when image_root is provided for SoundSpaces
     image_encoder = None
     if args.dataset_name == 'soundspaces' and args.image_root is not None:
         assert ie_config is not None, "image_encoder_config missing from model config JSON"
         cross_attention_dim = model_config['block_out_channels'][-1]
-        ie_config['image_size'] = tuple(ie_config['image_size'])  # JSON gives list, encoder expects tuple
         image_encoder = ImageEncoder(out_dim=cross_attention_dim, **ie_config)
         print(f"\nImageEncoder: DA3 ViT-{ie_config['model_variant']}, out_dim={cross_attention_dim}, "
               f"~{image_encoder.n_tokens(n_img=1)} tokens per sample\n")
