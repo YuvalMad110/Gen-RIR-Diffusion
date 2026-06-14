@@ -91,6 +91,10 @@ class DiffusionTrainer():
             
         # ============= Start Epoch loop =============
         for epoch in range(self.epochs):
+            # Advance EpochSubsetSampler seed so each epoch draws a different random subset
+            if hasattr(train_dataloader.sampler, 'set_epoch'):
+                train_dataloader.sampler.set_epoch(epoch)
+
             # ---------- TRAINING ----------
             cur_epoch_losses['train_loss'], cur_epoch_losses['train_norm_loss'] = self._training_epoch(train_dataloader, epoch, scaler)
 

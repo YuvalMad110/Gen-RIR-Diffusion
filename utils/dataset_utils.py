@@ -1,6 +1,43 @@
-import hashlib
 import numpy as np
 from sklearn.model_selection import train_test_split
+
+
+def _greedy_group_split(unique_groups, group_sizes, train_ratio, eval_ratio, test_ratio):
+    """
+    Assign groups to train/eval/test to approximate the requested sample-count
+    ratios using a greedy LPT (Longest Processing Time) strategy.
+
+    Groups are sorted largest-first. Each is assigned to whichever split has
+    the largest remaining sample gap. After the greedy pass, any split that
+    ended up empty (possible with very few groups) steals the smallest group
+    from the split with the most groups.
+    """
+    total   = sum(group_sizes.values())
+    targets = {'train': total * train_ratio, 'eval': total * eval_ratio, 'test': total * test_ratio}
+    filled  = {'train': 0.0, 'eval': 0.0, 'test': 0.0}
+    assignment = {g: None for g in unique_groups}
+
+    for g in sorted(unique_groups, key=lambda g: group_sizes[g], reverse=True):
+        best = max(('train', 'eval', 'test'), key=lambda s: targets[s] - filled[s])
+        assignment[g]  = best
+        filled[best]  += group_sizes[g]
+
+    # Guarantee at least 1 group per split
+    splits = {'train', 'eval', 'test'}
+    for empty_split in splits:
+        if not any(s == empty_split for s in assignment.values()):
+            donor = max(splits - {empty_split},
+                        key=lambda s: sum(1 for v in assignment.values() if v == s))
+            # Take the smallest group from the donor split
+            victim = min((g for g, s in assignment.items() if s == donor),
+                         key=lambda g: group_sizes[g])
+            assignment[victim] = empty_split
+
+    return (
+        {g for g, s in assignment.items() if s == 'train'},
+        {g for g, s in assignment.items() if s == 'eval'},
+        {g for g, s in assignment.items() if s == 'test'},
+    )
 
 
 def create_data_splits(items, group_keys=None, split_by_group=True,
@@ -37,21 +74,15 @@ def create_data_splits(items, group_keys=None, split_by_group=True,
         assert group_keys is not None, \
             "group_keys must be provided when split_by_group=True"
 
-        # Deterministic group ordering via hash
         unique_groups = sorted(set(group_keys))
-        hash_values = [
-            int(hashlib.md5(f"{g}_{seed}".encode()).hexdigest()[:8], 16)
-            for g in unique_groups
-        ]
-        unique_groups = [unique_groups[i] for i in np.argsort(hash_values)]
-
-        n = len(unique_groups)
-        n_train = int(n * train_ratio)
-        n_eval  = int(n * eval_ratio)
-
-        train_set = set(unique_groups[:n_train])
-        eval_set  = set(unique_groups[n_train:n_train + n_eval])
-        test_set  = set(unique_groups[n_train + n_eval:])
+        if len(unique_groups) < 3:
+            raise ValueError(
+                f"Need at least 3 groups for a train/eval/test split, got {len(unique_groups)}."
+            )
+        group_sizes = {g: sum(1 for gk in group_keys if gk == g) for g in unique_groups}
+        train_set, eval_set, test_set = _greedy_group_split(
+            unique_groups, group_sizes, train_ratio, eval_ratio, test_ratio
+        )
 
         train_items = [item for item, gk in zip(items, group_keys) if gk in train_set]
         eval_items  = [item for item, gk in zip(items, group_keys) if gk in eval_set]

@@ -16,7 +16,7 @@ from RIRDiffusionModel import RIRDiffusionModel
 from image_encoder import ImageEncoder
 from diffusers import DDPMScheduler
 from trainer import DiffusionTrainer
-from utils.misc import str2bool
+from utils.epoch_subset_sampler import EpochSubsetSampler
 
 _DEFAULT_CFG     = '/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/model_config_cond_encoder_cfg.json'
 _DEFAULT_SS_ROOT = '/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica/'
@@ -135,25 +135,18 @@ def get_datasets_folder():
     else: # on the server
          return os.path.normpath('./datasets/GTU_rir/GTU_RIR.pickle.dat')
 
-def gather_data_info(args, train_dataloader):
-    sample_size = get_sample_size(train_dataloader, args.n_fft, args.hop_length)
-    data_info = {"n_fft": args.n_fft,
-                 "hop_length": args.hop_length, 
-                 "use_spectrogram": True, 
-                 "sample_size": sample_size,
-                 "sample_max_sec": args.sample_max_sec, 
-                 "sr_target": args.sr_target,
-                 "nSamples": args.nSamples,
-                 "db_cutoff": args.db_cutoff,
-                 "scale_rir": args.scale_rir,
-                 "apply_zero_tail": args.apply_zero_tail,
-                 "train_ratio": args.train_ratio,
-                 "eval_ratio": args.eval_ratio,
-                 "test_ratio": args.test_ratio,
-                 "split_by_room": args.split_by_room,
-                 "random_seed": args.random_seed
-                 }
-    return data_info   
+
+def make_train_dataloader(dataset, args, collate_fn):
+    """Build the training DataLoader, using EpochSubsetSampler when nSamples is set."""
+    if args.dataset_name == 'soundspaces' and args.nSamples and args.nSamples < len(dataset):
+        sampler = EpochSubsetSampler(len(dataset), args.nSamples)
+        return DataLoader(dataset, batch_size=args.batch_size, sampler=sampler,
+                          num_workers=args.workers, collate_fn=collate_fn,
+                          drop_last=True, pin_memory=torch.cuda.is_available())
+    return DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
+                      num_workers=args.workers, collate_fn=collate_fn,
+                      drop_last=True, pin_memory=torch.cuda.is_available())
+
 
 def get_sample_size(dataloader, n_fft, hop_length):
     """Get the sample size that the UNet will operate on (spectrogram dimensions).
@@ -209,8 +202,7 @@ def main():
         dataset_type=args.dataset_name,
     )
     
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
-        collate_fn=collate_fn, drop_last=True, pin_memory=torch.cuda.is_available())
+    train_dataloader = make_train_dataloader(train_dataset, args, collate_fn)
 
     eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
         collate_fn=collate_fn, drop_last=False, pin_memory=torch.cuda.is_available())

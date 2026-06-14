@@ -1,4 +1,5 @@
 import pickle
+import random
 import torch
 from torch.utils.data import Dataset
 import torchaudio
@@ -142,9 +143,9 @@ def create_gtu_datasets(tar_path, split=True, nSamples=None, train_ratio=0.7, ev
     # Load all data once
     all_data = _load_data_from_tar(tar_path, inside_file)
     
-    # Apply nSamples limit if specified
+    # Apply nSamples limit: random subset (reproducible via random_seed) so all rooms are represented
     if nSamples and nSamples < len(all_data):
-        all_data = all_data[:nSamples]
+        all_data = random.Random(random_seed).sample(all_data, nSamples)
     
     if split:
         # Create splits and return 3 datasets
