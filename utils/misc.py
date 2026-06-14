@@ -10,6 +10,61 @@ import pytz
 import numpy as np
 import re
 
+def get_git_hash():
+    """Return short git hash, appending '-dirty' if there are uncommitted changes."""
+    try:
+        import subprocess
+        cwd = os.path.dirname(os.path.abspath(__file__))
+        hash_ = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            stderr=subprocess.DEVNULL, cwd=cwd
+        ).decode().strip()
+        dirty = subprocess.call(
+            ['git', 'diff', '--quiet'],
+            stderr=subprocess.DEVNULL, cwd=cwd
+        ) != 0
+        return f"{hash_}-dirty" if dirty else hash_
+    except Exception:
+        return "unknown"
+
+
+def build_run_header(args, ie_config, git_hash, model_config, sample_size):
+    """Build a formatted multi-line header string for the training log.
+
+    Returns a string covering Run/Dataset/Audio/Images/Model/Training sections.
+    The caller (trainer) appends the Accelerator and dataset-sizes lines, which
+    are only available after accelerator.prepare().
+    """
+    _P = "          "
+    _C = _P + "              "   # continuation indent: aligns after "[Accelerator] "
+
+    scenes_str = "all" if args.scenes is None else ", ".join(args.scenes)
+
+    lines = [
+        f"{_P}[Run]         Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Host: {socket.gethostname()} | Git: {git_hash}",
+        f"{_P}[Dataset]     Name: {args.dataset_name} | Split: {args.train_ratio:.2f}/{args.eval_ratio:.2f}/{args.test_ratio:.2f} | Seed: {args.random_seed} | nSamples: {args.nSamples}",
+        f"{_C}Scenes: {scenes_str}",
+        f"{_P}[Audio]       SR: {args.sr_target} Hz | MaxSec: {args.sample_max_sec}s | n_fft: {args.n_fft} | hop: {args.hop_length} | dB: {args.db_cutoff} | scale: {args.scale_rir} | zero_tail: {args.apply_zero_tail}",
+    ]
+
+    if args.image_root is not None and ie_config is not None:
+        variant_short = f"ViT-{ie_config.get('model_variant', '?')[0].upper()}"
+        lines += [
+            f"{_P}[Images]      Root: {args.image_root}",
+            f"{_C}Pair: {args.rir_view_type} | Overview: {args.room_overview_type}",
+            f"{_C}Encoder: {variant_short} | Mode: {ie_config.get('feature_mode','?')} | last_n: {ie_config.get('last_n','?')} | combine: {ie_config.get('layer_combination','?')} | size: {ie_config.get('image_size','?')}",
+        ]
+    else:
+        lines.append(f"{_P}[Images]      (none)")
+
+    lines += [
+        f"{_P}[Model]       Shape: {list(sample_size)} | n_timesteps: {args.n_timesteps} | Channels: {model_config.get('block_out_channels','?')} | Guidance: {model_config.get('guidance_enabled', False)} (p={model_config.get('guidance_dropout_prob','?')})",
+        f"{_P}[Training]    Epochs: {args.epochs} | Batch: {args.batch_size} | LR: {args.lr:.0e} | Workers: {args.workers} | Eval freq: {args.eval_freq} | Ckpt freq: {args.checkpoint_freq}",
+    ]
+
+    return "\n".join(lines)
+
+
 def count_model_parameters(model):
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

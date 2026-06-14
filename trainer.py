@@ -4,7 +4,6 @@ import datetime
 import logging
 import torch
 import torch.nn.functional as F
-import math
 import shutil
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
@@ -27,16 +26,13 @@ class DiffusionTrainer():
                  epochs=20,
                  checkpoint_freq=10,
                  eval_freq=5,
-                 data_info=None,
                  model=None,
                  optimizer=None,
                  noise_scheduler=None,
                  accelerator=None,
                  n_fft=256,
-                 hop_length=64):
-        """
-        Initialize the RIR generator.
-        """
+                 hop_length=64,
+                 run_header=""):
         # -------- Cfg --------
         self.model = model
         self.optimizer = optimizer
@@ -48,13 +44,15 @@ class DiffusionTrainer():
         self.checkpoint_freq = checkpoint_freq
         self.eval_freq = eval_freq
         self.logdir = get_timestamped_logdir('outputs/not_completed')
-        self.data_info = data_info if data_info is not None else {}
         self.n_fft = n_fft
         self.hop_length = hop_length
-         # Setup Accelerator for DDP/AMP
+        self.run_header = run_header
+        # Setup Accelerator for DDP/AMP
         self.accelerator = accelerator
         if self.accelerator.is_main_process:
             os.makedirs(self.logdir, exist_ok=False)
+            os.makedirs(os.path.join(self.logdir, 'plots'), exist_ok=False)
+            os.makedirs(os.path.join(self.logdir, 'configs'), exist_ok=False)
             logging.basicConfig(filename=os.path.join(self.logdir, "train.log"),
                                 level=logging.DEBUG,
                                 format='%(asctime)s - %(message)s')
@@ -82,13 +80,8 @@ class DiffusionTrainer():
             self.model, self.optimizer, train_dataloader, eval_dataloader)
 
         if self.accelerator.is_main_process:
-            logging.info(f"*** Start RIR-GEN Diffusion Training ***\n"
-                        f"          [Accelerator] is_distributed: {self.accelerator.distributed_type != 'NO'} | nProcesses: {self.accelerator.num_processes} | Device: {self.accelerator.device}\n"
-                        f"          [Dataloader] Train size: {len(train_dataloader.dataset)} | len(train_loader): {len(train_dataloader)} | Val size: {len(eval_dataloader.dataset)}\n"
-                        f"          [RunParams] Epochs: {self.epochs} | Batch size: {math.ceil(len(train_dataloader.dataset) / len(train_dataloader))} | Eval freq: {self.eval_freq}\n"
-                        f"          [Model] LR: {self.lr} | Sample-Size: {self.data_info["sample_size"]} | n_timesteps: {self.noise_scheduler.num_train_timesteps}\n" #  | nParams: {self.model.count_parameters()}
-                        f"          [Data] {self.data_info}\n\n")
-            
+            self._log_run_header(train_dataloader, eval_dataloader)
+
         # ============= Start Epoch loop =============
         for epoch in range(self.epochs):
             # Advance EpochSubsetSampler seed so each epoch draws a different random subset
@@ -127,6 +120,15 @@ class DiffusionTrainer():
             print(final_msg)
             
         return new_logdir
+
+    def _log_run_header(self, train_dataloader, eval_dataloader):
+        _P = "          "
+        logging.info(
+            f"*** Start RIR-GEN Diffusion Training ***\n"
+            f"{self.run_header}\n"
+            f"{_P}[Accelerator] Distributed: {self.accelerator.distributed_type != 'NO'} | Processes: {self.accelerator.num_processes} | Device: {self.accelerator.device}\n"
+            f"{_P}[Sizes]       Train: {len(train_dataloader.dataset)} ({len(train_dataloader)} batches) | Val: {len(eval_dataloader.dataset)}\n\n"
+        )
 
     def _training_epoch(self, train_dataloader, epoch, scaler):
         """Complete training epoch"""
@@ -229,16 +231,16 @@ class DiffusionTrainer():
         return norm_loss_value
 
     def _plot_all_metrics(self, losses_per_epoch):
-        """Save all metrics plots"""
-        save_metric(losses_per_epoch['train_loss'], 'log-train-loss', self.logdir, apply_log=True)
-        save_metric(losses_per_epoch['train_loss'], 'train-loss', self.logdir, apply_log=False)
-        save_metric(losses_per_epoch['train_norm_loss'], 'log-train-norm-loss', self.logdir, apply_log=True)
-        save_metric(losses_per_epoch['train_norm_loss'], 'train-norm-loss', self.logdir, apply_log=False)
-        
-        save_metric(losses_per_epoch['eval_loss'], 'log-eval-loss', self.logdir, apply_log=True)
-        save_metric(losses_per_epoch['eval_loss'], 'eval-loss', self.logdir, apply_log=False)
-        save_metric(losses_per_epoch['eval_norm_loss'], 'log-eval-norm-loss', self.logdir, apply_log=True)
-        save_metric(losses_per_epoch['eval_norm_loss'], 'eval-norm-loss', self.logdir, apply_log=False)
+        plots_dir = os.path.join(self.logdir, 'plots')
+        save_metric(losses_per_epoch['train_loss'], 'log-train-loss', plots_dir, apply_log=True)
+        save_metric(losses_per_epoch['train_loss'], 'train-loss', plots_dir, apply_log=False)
+        save_metric(losses_per_epoch['train_norm_loss'], 'log-train-norm-loss', plots_dir, apply_log=True)
+        save_metric(losses_per_epoch['train_norm_loss'], 'train-norm-loss', plots_dir, apply_log=False)
+
+        save_metric(losses_per_epoch['eval_loss'], 'log-eval-loss', plots_dir, apply_log=True)
+        save_metric(losses_per_epoch['eval_loss'], 'eval-loss', plots_dir, apply_log=False)
+        save_metric(losses_per_epoch['eval_norm_loss'], 'log-eval-norm-loss', plots_dir, apply_log=True)
+        save_metric(losses_per_epoch['eval_norm_loss'], 'eval-norm-loss', plots_dir, apply_log=False)
 
     def _epoch_wrapup(self, epoch, cur_epoch_losses, best_loss, losses_per_epoch, 
                      train_start_time, best_model_dict, lr):
@@ -267,8 +269,6 @@ class DiffusionTrainer():
                 'use_cond_encoder': model_unwrapped.use_cond_encoder,
                 'model_nParams': model_unwrapped.count_parameters(),
                 'model_config': model_unwrapped.config,
-                'sample_size': self.data_info.get('sample_size', None),
-                'data_info': self.data_info,
                 'state_dict': model_unwrapped.state_dict(),
                 'optimizer': self.optimizer.state_dict(),
                 'losses_per_epoch': losses_per_epoch

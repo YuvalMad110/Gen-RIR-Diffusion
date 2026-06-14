@@ -98,6 +98,30 @@ def save_config_summary(config: Dict, data_params: Dict, args: Any, save_path: s
     print(f"Config summary saved to: {output_path}")
 
 
+def save_run_config(run_dir: str, args, model_config: Dict, ie_config: Optional[Dict],
+                    git_hash: str) -> None:
+    """Save all training settings as a single human-readable JSON for reproducibility."""
+    import socket
+
+    def _to_json(obj):
+        if hasattr(obj, 'tolist'):   # torch.Size, tensors, numpy arrays
+            return obj.tolist()
+        return str(obj)
+
+    record = {
+        "timestamp": datetime.now().isoformat(timespec='seconds'),
+        "git_hash": git_hash,
+        "host": socket.gethostname(),
+        "args": vars(args),
+        "model_config": model_config,
+        "image_encoder_config": ie_config,
+    }
+
+    out_path = Path(run_dir) / "run_config.json"
+    with open(out_path, 'w') as f:
+        json.dump(record, f, indent=2, default=_to_json)
+
+
 def create_output_directory(base_path: Optional[str], model_path: str,
                             create_timestamp: bool = True) -> Path:
     """Create output directory for inference results."""

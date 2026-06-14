@@ -16,7 +16,9 @@ from RIRDiffusionModel import RIRDiffusionModel
 from image_encoder import ImageEncoder
 from diffusers import DDPMScheduler
 from trainer import DiffusionTrainer
+from utils.misc import str2bool, get_git_hash, build_run_header
 from utils.epoch_subset_sampler import EpochSubsetSampler
+from utils.io_utils import save_run_config
 
 _DEFAULT_CFG     = '/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/model_config_VisualCond.json'
 _DEFAULT_SS_ROOT = '/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica/'
@@ -187,6 +189,8 @@ def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    git_hash = get_git_hash()
+
     # ---------- debug mode ----------
     debug_mode = False
     if debug_mode:
@@ -236,8 +240,9 @@ def main():
 
     eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
         collate_fn=collate_fn, drop_last=False, pin_memory=torch.cuda.is_available())
-    
-    data_info = gather_data_info(args, train_dataloader)
+
+    sample_size = get_sample_size(train_dataloader, args.n_fft, args.hop_length)
+    run_header = build_run_header(args, ie_config, git_hash, model_config, sample_size)
     print(f"\nxxxxxxx\nDataloader splits: {len(train_dataloader)} - {len(eval_dataloader)}\nxxxxxxx\n")
 
 
@@ -253,7 +258,7 @@ def main():
 
     model = RIRDiffusionModel(
         device=device,
-        sample_size=data_info['sample_size'],
+        sample_size=sample_size,
         n_timesteps=args.n_timesteps,
         image_encoder=image_encoder,
         **model_config,
@@ -277,25 +282,30 @@ def main():
         epochs=args.epochs,
         checkpoint_freq=args.checkpoint_freq,
         eval_freq=args.eval_freq,
-        data_info=data_info,
         n_fft=args.n_fft,
         hop_length=args.hop_length,
+        run_header=run_header,
     )
-    
+
     # ---------- Train ----------
     print("\n---------- Starting training... ----------\n")
     model_path = trainer.train(train_dataloader=train_dataloader, eval_dataloader=eval_dataloader)
 
-    # ---------- Save model and training arguments ----------
+    # ---------- Save run config and model artifacts ----------
     if accelerator.is_main_process:
-        # Save training arguments and model configuration
-        torch.save(args, os.path.join(model_path, 'run_args.pth'))
+        configs_dir = os.path.join(model_path, 'configs')
 
-        # Save the model configuration used for this training
-        model_config_path = os.path.join(model_path, 'model_config.json')
-        with open(model_config_path, 'w') as f:
+        save_run_config(model_path, args, model.config, ie_config, git_hash)
+
+        with open(os.path.join(configs_dir, 'model_config.json'), 'w') as f:
             json.dump(model.config, f, indent=2)
-        
+
+        import shutil
+        shutil.copy(args.model_config, os.path.join(configs_dir, 'model_config_original.json'))
+
+        if args.dataset_name == 'soundspaces' and args.room_overview_config is not None:
+            shutil.copy(args.room_overview_config, os.path.join(configs_dir, 'room_overview_config.json'))
+
         print('\n---------- Training finished successfully!! ----------\n')
 
     # ---------- Distroy Process Group ----------
