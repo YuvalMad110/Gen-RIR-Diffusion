@@ -18,6 +18,8 @@ from scipy.stats import linregress
 from typing import Dict, List, Tuple, Optional, Union
 import warnings
 
+DEFAULT_T60_FIT_RANGE: Tuple[float, float] = (-5, -25)
+
 
 # =============================================================================
 # Energy Decay Curve (EDC) - Foundation for T60/EDT
@@ -98,8 +100,8 @@ def compute_edc_octave_bands(rir: np.ndarray, sr: int,
 # T60 (Reverberation Time)
 # =============================================================================
 
-def estimate_t60_from_edc(edc_db: np.ndarray, sr: int, 
-                          fit_range: Tuple[float, float] = (-5, -35)) -> float:
+def estimate_t60_from_edc(edc_db: np.ndarray, sr: int,
+                          fit_range: Tuple[float, float] = DEFAULT_T60_FIT_RANGE) -> float:
     """
     Estimate T60 from EDC using linear regression.
     
@@ -144,65 +146,68 @@ def estimate_t60_from_edc(edc_db: np.ndarray, sr: int,
         return np.nan
 
 
-def compute_t60(rir: np.ndarray, sr: int) -> float:
+def compute_t60(rir: np.ndarray, sr: int, fit_range: Tuple[float, float] = DEFAULT_T60_FIT_RANGE) -> float:
     """
     Compute broadband T60 from RIR.
-    
+
     Args:
         rir: Room impulse response
         sr: Sample rate
-    
+        fit_range: (start_db, end_db) window for EDC slope estimation
+
     Returns:
         T60 in seconds
     """
     edc_db = compute_edc(rir)
-    return estimate_t60_from_edc(edc_db, sr)
+    return estimate_t60_from_edc(edc_db, sr, fit_range)
 
 
-def compute_t60_batch(rirs: List[np.ndarray], sr: int) -> List[float]:
+def compute_t60_batch(rirs: List[np.ndarray], sr: int, fit_range: Tuple[float, float] = DEFAULT_T60_FIT_RANGE) -> List[float]:
     """Compute broadband T60 for a list of RIRs. Raises ValueError if any estimate returns NaN."""
     results = []
     for i, rir in enumerate(rirs):
-        t60 = compute_t60(rir, sr)
+        t60 = compute_t60(rir, sr, fit_range)
         if np.isnan(t60):
             raise ValueError(f"RT60 estimation returned NaN for RIR at index {i}.")
         results.append(t60)
     return results
 
 
-def compute_t60_octave_bands(rir: np.ndarray, sr: int,
-                              center_freqs: List[float] = None) -> Dict[float, float]:
+def compute_t60_octave_bands(rir: np.ndarray, sr: int, center_freqs: List[float] = None,
+                              fit_range: Tuple[float, float] = DEFAULT_T60_FIT_RANGE) -> Dict[float, float]:
     """
     Compute T60 for each octave band.
-    
+
     Args:
         rir: Room impulse response
         sr: Sample rate
         center_freqs: Octave band center frequencies
-    
+        fit_range: (start_db, end_db) window for EDC slope estimation
+
     Returns:
         Dictionary mapping center frequency to T60 (seconds)
     """
     edcs = compute_edc_octave_bands(rir, sr, center_freqs)
     t60s = {}
-    
+
     for fc, edc_db in edcs.items():
-        t60s[fc] = estimate_t60_from_edc(edc_db, sr)
-    
+        t60s[fc] = estimate_t60_from_edc(edc_db, sr, fit_range)
+
     return t60s
 
 
 def t60_error(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
-              center_freqs: List[float] = None) -> Dict[str, Union[float, Dict[float, float]]]:
+              center_freqs: List[float] = None, fit_range: Tuple[float, float] = DEFAULT_T60_FIT_RANGE) -> Dict[str, Union[float, Dict[float, float]]]:
     """
     Compute T60 error between generated and reference RIR.
-    
+
     Args:
         rir_gen: Generated RIR
         rir_ref: Reference RIR
         sr: Sample rate
         center_freqs: Octave band center frequencies
-    
+        fit_range: (start_db, end_db) window for EDC slope estimation
+
     Returns:
         Dictionary with:
         - 'broadband': Absolute T60 error (seconds)
@@ -210,12 +215,12 @@ def t60_error(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
         - 'mean_band_error': Mean absolute error across bands
     """
     # Broadband
-    t60_gen = compute_t60(rir_gen, sr)
-    t60_ref = compute_t60(rir_ref, sr)
-    
+    t60_gen = compute_t60(rir_gen, sr, fit_range)
+    t60_ref = compute_t60(rir_ref, sr, fit_range)
+
     # Per octave band
-    t60_gen_bands = compute_t60_octave_bands(rir_gen, sr, center_freqs)
-    t60_ref_bands = compute_t60_octave_bands(rir_ref, sr, center_freqs)
+    t60_gen_bands = compute_t60_octave_bands(rir_gen, sr, center_freqs, fit_range)
+    t60_ref_bands = compute_t60_octave_bands(rir_ref, sr, center_freqs, fit_range)
     
     band_errors = {}
     for fc in t60_gen_bands:
@@ -669,7 +674,8 @@ ALL_METRICS = ['t60', 'edt', 'drr', 'c50', 'c80', 'lsd', 'edc_distance', 'cosine
 
 def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
                       center_freqs: List[float] = None, dry_signal: np.ndarray = None,
-                      metrics: List[str] = None) -> Dict:
+                      metrics: List[str] = None,
+                      fit_range: Tuple[float, float] = DEFAULT_T60_FIT_RANGE) -> Dict:
     """
     Comprehensive evaluation of a generated RIR against reference.
 
@@ -680,6 +686,7 @@ def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
         center_freqs: Octave band center frequencies
         dry_signal: Optional dry signal to convolve with RIRs for reverbed LSD
         metrics: List of metric keys to compute (default: all). Options: t60, edt, drr, c50, c80, lsd, edc_distance, cosine_similarity
+        fit_range: (start_db, end_db) window for T60 EDC slope estimation
 
     Returns:
         Dictionary containing requested metrics
@@ -691,7 +698,7 @@ def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
 
     results = {}
     if 't60' in metrics:
-        results['t60'] = t60_error(rir_gen, rir_ref, sr, center_freqs)
+        results['t60'] = t60_error(rir_gen, rir_ref, sr, center_freqs, fit_range)
     if 'edt' in metrics:
         results['edt'] = edt_error(rir_gen, rir_ref, sr)
     if 'drr' in metrics:
@@ -716,25 +723,26 @@ def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
     return results
 
 
-def evaluate_rir_batch(rirs_gen: List[np.ndarray], rirs_ref: List[np.ndarray], 
-                       sr: int, center_freqs: List[float] = None) -> Dict:
+def evaluate_rir_batch(rirs_gen: List[np.ndarray], rirs_ref: List[np.ndarray],
+                       sr: int, center_freqs: List[float] = None, fit_range: Tuple[float, float] = DEFAULT_T60_FIT_RANGE) -> Dict:
     """
     Evaluate a batch of generated RIRs against references.
-    
+
     Args:
         rirs_gen: List of generated RIRs
         rirs_ref: List of reference RIRs
         sr: Sample rate
         center_freqs: Octave band center frequencies
-    
+        fit_range: (start_db, end_db) window for T60 EDC slope estimation
+
     Returns:
         Dictionary with individual and aggregate metrics
     """
     assert len(rirs_gen) == len(rirs_ref), "Number of generated and reference RIRs must match"
-    
+
     individual_results = []
     for rir_gen, rir_ref in zip(rirs_gen, rirs_ref):
-        individual_results.append(evaluate_rir_pair(rir_gen, rir_ref, sr, center_freqs))
+        individual_results.append(evaluate_rir_pair(rir_gen, rir_ref, sr, center_freqs, fit_range=fit_range))
     
     # Aggregate results
     aggregate = aggregate_metrics(individual_results)

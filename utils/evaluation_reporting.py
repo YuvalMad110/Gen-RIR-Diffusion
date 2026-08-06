@@ -96,7 +96,7 @@ def _format_comparison_table(aggregate, baseline_aggregate, diff_all_metrics, ba
 def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_train_steps, save_path,
                             title="RIR DIFFUSION MODEL - EVALUATION SUMMARY",
                             baseline_aggregate=None, baseline_all_metrics=None, baseline_method=None,
-                            all_metrics=None):
+                            all_metrics=None, t60_fit_range=None):
     """Save evaluation summary to a text file.
 
     Args:
@@ -170,6 +170,7 @@ def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_t
         f"Batch size: {getattr(args, 'batch_size', None)}",
         f"Octave bands: {getattr(args, 'octave_bands', None)}",
         f"Num workers: {getattr(args, 'workers', None)}",
+        f"T60 fit range (dB): {t60_fit_range}",
     ])
     if baseline_method:
         lines.append(f"Baseline method: {baseline_method}")

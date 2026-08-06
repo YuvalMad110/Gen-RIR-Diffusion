@@ -32,7 +32,7 @@ from utils.inference_data_loading import (
     load_pretrained_model, data_params_from_run_config,
     build_test_dataloader, build_condition_tensor, _normalize_batch_to_dict,
 )
-from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_t60_batch
+from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_t60_batch, DEFAULT_T60_FIT_RANGE
 from utils.misc import get_israel_time, resolve_model_dir
 from utils.evaluation import select_representative_samples
 from utils.evaluation_reporting import save_evaluation_summary, save_detailed_metrics_table, save_selected_samples
@@ -105,7 +105,7 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signa
             # --- Generate baseline RIRs (synthetic) ---
             baseline_waveforms = None
             if use_baseline:
-                rt60_estimates = compute_t60_batch(real_waveforms, sr) if conditions_np.shape[1] <= 9 else None
+                rt60_estimates = compute_t60_batch(real_waveforms, sr, args.t60_fit_range) if conditions_np.shape[1] <= 9 else None
                 baseline_waveforms = generate_synthetic_rirs_batch(
                     conditions_np, sr, max_length_samples=None, method=args.baseline_method, verbose=False, rt60_estimates=rt60_estimates, dataset_name=data_info.get('dataset_name', 'gtu'))
 
@@ -146,7 +146,7 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signa
             # Evaluate each pair and store all samples
             for i in range(batch_size):
                 rir_gen, rir_ref = align_rir_lengths(gen_waveforms[i], real_waveforms[i], mode='truncate')
-                metrics = evaluate_rir_pair(rir_gen, rir_ref, sr, octave_bands, dry_signal=dry_signal)
+                metrics = evaluate_rir_pair(rir_gen, rir_ref, sr, octave_bands, dry_signal=dry_signal, fit_range=args.t60_fit_range)
                 all_metrics.append(metrics)
 
                 sample_dict = {
@@ -159,7 +159,7 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signa
                 # Baseline evaluation
                 if use_baseline:
                     rir_base, rir_ref_base = align_rir_lengths(baseline_waveforms[i], real_waveforms[i], mode='truncate')
-                    baseline_metrics = evaluate_rir_pair(rir_base, rir_ref_base, sr, octave_bands, dry_signal=dry_signal)
+                    baseline_metrics = evaluate_rir_pair(rir_base, rir_ref_base, sr, octave_bands, dry_signal=dry_signal, fit_range=args.t60_fit_range)
                     baseline_all_metrics.append(baseline_metrics)
                     sample_dict['baseline'] = rir_base
                     sample_dict['baseline_metrics'] = baseline_metrics
@@ -190,12 +190,14 @@ def parse_args():
     parser.add_argument("--save_path", type=str, default=None, help="Output directory")
     parser.add_argument("--n_examples", type=int, default=5, help="Number of example pairs to visualize")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu)")
-    parser.add_argument("--workers", type=int, default=4, help="DataLoader workers")
+    parser.add_argument("--workers", type=int, default=8, help="DataLoader workers")
     parser.add_argument("--debug_mode", type=bool, default=False, help="Debug mode: fast run")
     parser.add_argument("--speech_path", type=str, default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/data/1195-130164-0010.wav',
                         help="Path to clean speech for reverbed LSD computation")
     parser.add_argument("--baseline_method", type=str, default='habets', choices=['habets', 'pra', 'none'],
                         help="Synthetic RIR baseline method")
+    parser.add_argument("--t60_fit_range", type=float, nargs=2, default=list(DEFAULT_T60_FIT_RANGE),
+                        help="dB window for RT60 EDC slope fit: upper lower (e.g. -5 -35)")
     return parser.parse_args()
 
 
@@ -280,6 +282,7 @@ def main():
         baseline_all_metrics=baseline_all_metrics if use_baseline else None,
         baseline_method=args.baseline_method if use_baseline else None,
         all_metrics=all_metrics if use_baseline else None,
+        t60_fit_range=args.t60_fit_range,
     )
     save_detailed_metrics_table(all_metrics, all_samples, save_path / 'detailed_metrics.csv')
     save_selected_samples(selected_samples, data_info, save_path)
