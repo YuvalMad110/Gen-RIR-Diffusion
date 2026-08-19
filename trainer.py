@@ -34,7 +34,9 @@ class DiffusionTrainer():
                  n_fft=256,
                  hop_length=64,
                  run_header="",
-                 src_trgt_dist_cond=False):
+                 src_trgt_dist_cond=False,
+                 sr=None,
+                 loss_weighting=None):
         # -------- Cfg --------
         self.model = model
         self.optimizer = optimizer
@@ -50,6 +52,8 @@ class DiffusionTrainer():
         self.hop_length = hop_length
         self.run_header = run_header
         self.src_trgt_dist_cond = src_trgt_dist_cond
+        self.sr = sr
+        self.loss_weighting = loss_weighting
         # Setup Accelerator for DDP/AMP
         self.accelerator = accelerator
         if self.accelerator.is_main_process:
@@ -167,6 +171,25 @@ class DiffusionTrainer():
 
         return epoch_loss, epoch_norm_loss
 
+    def _compute_loss(self, noise_pred, noise, batch):
+        """Compute training loss, optionally weighted by a per-sample RIR decay mask."""
+        if self.loss_weighting is None or self.loss_weighting['method'] == 'none':
+            return F.mse_loss(noise_pred, noise)
+
+        if self.loss_weighting['method'] == 'rt60_binary':
+            rt60 = batch['rt60'].to(noise.device)                          # [B]
+            alpha = abs(self.loss_weighting['db_threshold']) / 60.0
+            T = noise.shape[-1]                                            # spectrogram time frames
+            frame_rate = self.sr / self.hop_length
+            t = torch.arange(T, device=noise.device) / frame_rate         # [T] seconds
+            cutoff = (rt60 * alpha).clamp(max=T / frame_rate)             # [B]
+            mask = (t.unsqueeze(0) < cutoff.unsqueeze(1)).float()         # [B, T]
+            mask = mask[:, None, None, :]                                  # [B, 1, 1, T] broadcast over C, F
+            sq_err = (noise_pred - noise) ** 2
+            return (mask * sq_err).sum() / mask.expand_as(sq_err).sum()
+
+        raise ValueError(f"Unknown loss_weighting method: '{self.loss_weighting['method']}'")
+
     def _forward_step(self, batch, training=True, scaler=None):
         """Common forward step for training and evaluation.
 
@@ -202,14 +225,14 @@ class DiffusionTrainer():
         if self.use_amp:
             with autocast("cuda"):
                 noise_pred = self.model(noisy_rirs, timesteps, condition, images=images)["sample"]
-                loss = F.mse_loss(noise_pred, noise)
+                loss = self._compute_loss(noise_pred, noise, batch)
             if training:
                 scaler.scale(loss).backward()
                 scaler.step(self.optimizer)
                 scaler.update()
         else:
             noise_pred = self.model(noisy_rirs, timesteps, condition, images=images)["sample"]
-            loss = F.mse_loss(noise_pred, noise)
+            loss = self._compute_loss(noise_pred, noise, batch)
             if training:
                 loss.backward()
                 self.optimizer.step()

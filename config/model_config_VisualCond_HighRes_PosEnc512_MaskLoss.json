@@ -1,0 +1,52 @@
+{
+  "_section_unet": "UNet Architecture",
+  "block_out_channels": [32, 64, 128],
+  "layers_per_block": 2,
+  "use_cross_attention": null,
+  "attention_head_dim": 2,
+  "norm_num_groups": null,
+  "use_mid_block": true,
+  "in_channels": 2,
+  "out_channels": 2,
+
+  "_section_scalar_cond": "Scalar Conditioning MLP",
+  "use_cond_encoder": true,
+  "encoder_hidden_dims": [256, 512],
+  "src_trgt_dist_cond": true,
+
+  "_section_pos_encoder": "Fourier Positional Encoder (applied before condition MLP); output_dim = cond_dim + cond_dim*2*n_freqs = 11 + 11*2*6 = 143 (include_raw=true, encode_mode=full)",
+  "pos_encoder_cfg": {
+    "enable": true,
+    "encode_mode": "full",
+    "n_freqs": 6,
+    "log_scale": true,
+    "include_raw": true,
+    "max_freq_log2": 4.0,
+    "input_norm": [15, 15, 5, 15, 15, 5, 15, 15, 5, 1.0, 15]
+  },
+
+  "_section_image_cond": "Image Conditioning",
+  "image_fusion": "cross_attn",
+  "fusion_enable": true,
+  "image_encoder_config": {
+    "model_variant": "large",
+    "feature_mode": "pyramid",
+    "last_n": 4,
+    "layer_combination": "fuse",
+    "spatial_pool_factor": null,
+    "image_size": [392, 518]
+  },
+
+  "_section_guidance": "Classifier-Free Guidance",
+  "guidance_enabled": true,
+  "guidance_dropout_prob": 0.1,
+
+  "_section_loss": "Loss Weighting (training only; method='none' or omit for standard MSE)",
+  "loss_weighting": {
+    "method": "rt60_binary",
+    "db_threshold": -40
+  },
+
+  "_Note": "Every top-level key starting with '_' is for documentation purposes and is not used in the code.",
+  "_image_size_ideal": "For optimal performance, it's advised to use [392, 518], however this might be too heavy"
+}

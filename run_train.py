@@ -16,7 +16,7 @@ from RIRDiffusionModel import RIRDiffusionModel
 from image_encoder import ImageEncoder
 from diffusers import DDPMScheduler
 from trainer import DiffusionTrainer
-from utils.misc import str2bool, get_git_hash, build_run_header
+from utils.misc import str2bool, get_git_hash, build_run_header, get_full_path
 from utils.epoch_subset_sampler import EpochSubsetSampler
 from utils.io_utils import save_run_config
 
@@ -137,7 +137,10 @@ def load_model_config(config_path, dataset_name, use_rt60_condition=False):
     ie_config = model_config.pop('image_encoder_config', None)
     if ie_config and 'image_size' in ie_config:
         ie_config['image_size'] = tuple(ie_config['image_size'])
-    return model_config, ie_config, src_trgt_dist_cond
+    loss_weighting = model_config.pop('loss_weighting', None)
+    if loss_weighting is not None and loss_weighting.get('method') == 'rt60_binary' and not use_rt60_condition:
+        raise ValueError("loss_weighting 'rt60_binary' requires use_rt60_condition=True (batch['rt60'] must be present)")
+    return model_config, ie_config, src_trgt_dist_cond, loss_weighting
 
 def num_workers_test(dataset, nWorkers=[0,1,4,8,10, 12, 14, 16,18], batch_size=16):
     """
@@ -228,7 +231,8 @@ def main():
         args.split_by_room = False
 
     # ---------- Model config ----------
-    model_config, ie_config, src_trgt_dist_cond = load_model_config(args.model_config, args.dataset_name, args.use_rt60_condition)
+    args.model_config = str(get_full_path(args.model_config, "config"))
+    model_config, ie_config, src_trgt_dist_cond, loss_weighting = load_model_config(args.model_config, args.dataset_name, args.use_rt60_condition)
 
     # ---------- Load datasets ----------
     print("\n----------- Loading datasets... -----------\n")
@@ -291,6 +295,7 @@ def main():
         **model_config,
     )
     model.config['src_trgt_dist_cond'] = src_trgt_dist_cond
+    model.config['loss_weighting'] = loss_weighting
     print("\n---------- Initialized model ----------\n")
     
     # Scheduler 
@@ -314,6 +319,8 @@ def main():
         hop_length=args.hop_length,
         run_header=run_header,
         src_trgt_dist_cond=src_trgt_dist_cond,
+        sr=args.sr_target,
+        loss_weighting=loss_weighting,
     )
 
     # ---------- Train ----------
