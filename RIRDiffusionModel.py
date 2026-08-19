@@ -168,11 +168,12 @@ class RIRDiffusionModel(torch.nn.Module):
         if use_cond_encoder:
             # Build encoder layers
             encoder_layers = []
-            current_dim = input_cond_dim
-            for i, hidden_dim in enumerate(encoder_hidden_dims):
-                encoder_layers.append(torch.nn.Linear(current_dim, hidden_dim))
-                if i < len(encoder_hidden_dims) - 1:
-                    encoder_layers.append(torch.nn.ReLU())
+            current_dim = mlp_input_dim
+            for hidden_dim in encoder_hidden_dims:
+                encoder_layers.extend([
+                    torch.nn.Linear(current_dim, hidden_dim),
+                    torch.nn.ReLU(),
+                ])
                 current_dim = hidden_dim
             
             self.condition_encoder = torch.nn.Sequential(*encoder_layers).to(self.device)
