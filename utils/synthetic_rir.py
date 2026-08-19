@@ -118,10 +118,10 @@ def generate_synthetic_rirs_batch(conditions, sr, max_length_samples=None, metho
         room_dims = cond[:3].tolist()
         mic_pos = cond[3:6].tolist()
         speaker_pos = cond[6:9].tolist()
-        if len(cond) > 9:
-            rt60 = float(cond[9])
-        elif rt60_estimates is not None:
+        if rt60_estimates is not None:
             rt60 = float(rt60_estimates[i])
+        elif len(cond) > 9:
+            rt60 = float(cond[9])
         else:
             raise ValueError("RT60 not in condition vector and no rt60_estimates provided")
 

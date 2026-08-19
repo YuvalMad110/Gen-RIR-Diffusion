@@ -17,7 +17,7 @@ Input images  [B, N_img, 3, H, W]
       │
       ▼  ═══════════════ ImageEncoder ════════════════════════════════════════
       │
-      ├─ [1] Backbone forward (frozen DA3 ViT)
+      ├─ [1] Backbone forward (frozen DA2 ViT)
       │       → hidden states at selected pyramid layers
       │
       ├─ [2] Strip CLS token, keep patch tokens
@@ -59,10 +59,10 @@ Scalar params  [B, C_s]
 - `P` = number of patch tokens per image = `(H/14) × (W/14)` (e.g. 392×518 input → 28×37 = 1036)
 - `D_vit` = backbone hidden dim (1024 for ViT-L, 768 for ViT-B)
 - `N_L` = number of selected layers (default 4 for pyramid)
-- `D` = `out_dim` = `cross_attention_dim` (default 128; see experiment note below)
+- `D` = `out_dim` = `cross_attention_dim` — driven by `encoder_hidden_dims[-1]` in the model config JSON (MLP output width); ImageEncoder `out_dim` is set automatically from this value
 - `C_s` = scalar conditioning dim (9 for SoundSpaces, 10 for GTU with RT60)
 
-**DA3 (Depth Anything 3):** a monocular depth estimation model built on DINOv2.
+**DA2 (Depth Anything V2):** a monocular depth estimation model built on DINOv2.
 Its ViT encoder is geometry-aware and used here as a frozen feature extractor;
 the depth estimation head is discarded.
 
@@ -174,5 +174,7 @@ and image tokens must share the same dimension). Recommended values to explore:
 | 128 (current) | Minimal memory; likely under-capacity for image features |
 | 256 | Good first step; doubles capacity with modest memory increase |
 | 512 | Closer to standard vision-language embedding dims |
+
+To change `D`, set `encoder_hidden_dims[-1]` in the model config JSON — `cross_attention_dim` and ImageEncoder `out_dim` update automatically.
 
 This is one of the highest-impact hyperparameters to ablate once baseline runs are established.
