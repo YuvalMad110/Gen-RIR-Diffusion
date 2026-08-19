@@ -63,7 +63,7 @@ def load_pretrained_model(run_dir: str, device: torch.device):
     ie_config = run_config.get('image_encoder_config')
     if ie_config is not None and run_config['args'].get('image_root') is not None:
         from image_encoder import ImageEncoder
-        cross_attention_dim = model_config['block_out_channels'][-1]
+        cross_attention_dim = model_config['encoder_hidden_dims'][-1]
         image_encoder = ImageEncoder(out_dim=cross_attention_dim, **ie_config)
 
     model = RIRDiffusionModel.init_from_config(model_config, device, image_encoder)

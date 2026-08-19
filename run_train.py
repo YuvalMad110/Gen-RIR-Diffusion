@@ -20,7 +20,7 @@ from utils.misc import str2bool, get_git_hash, build_run_header, get_full_path
 from utils.epoch_subset_sampler import EpochSubsetSampler
 from utils.io_utils import save_run_config
 
-_DEFAULT_CFG     = '/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/model_config_VisualCond.json'
+_DEFAULT_CFG     = 'model_config_VisualCond_HighRes_PosEnc512.json'
 _DEFAULT_SS_ROOT = '/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica/'
 
 """
@@ -29,26 +29,12 @@ CUDA_VISIBLE_DEVICES=3 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --batch
 |& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
 
 # SoundSpaces — scalar conditioning only (no images):
-CUDA_VISIBLE_DEVICES=3 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --dataset-name soundspaces --batch-size 4 --epochs 50 \
-|& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
+CUDA_VISIBLE_DEVICES=1 python3 ./Projects/Gen-RIR-Diffusion/run_train.py \
+    --batch-size 58 \
+    --model-config model_config_VisualCond_HighRes_NoDist.json \
+    |& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
 
-# SoundSpaces — with image conditioning (model_config_VisualCond.json):
-CUDA_VISIBLE_DEVICES=3 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --dataset-name soundspaces --batch-size 4 --epochs 50 \
-    --model-config ./Projects/Gen-RIR-Diffusion/config/model_config_VisualCond.json \
-    --image-root /dsi/gannot-lab/gannot-lab1/datasets/Replica_rendered/target2source_rgb/ \
-|& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
-
-# SoundSpaces — initial test on a few scenes (no images):
-CUDA_VISIBLE_DEVICES=3 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --dataset-name soundspaces --batch-size 4 --epochs 10 \
-    --scenes office_2 room_0 apartment_0 \
-|& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
-
-CUDA_VISIBLE_DEVICES=1 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --dataset-name soundspaces --batch-size 8 |& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
-
-CUDA_VISIBLE_DEVICES=1 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --use-rt60-condition --dataset-name soundspaces --post-train-eval true
-python3 ./Projects/Gen-RIR-Diffusion/run_train.py --use-rt60-condition --post-train-eval true --image-root /dsi/gannot-lab/gannot-lab1/datasets/Replica_rendered/ --model-config /home/yuvalmad/Projects/Gen-RIR-Diffusion/config/model_config_VisualCond_HighRes.json
 """
-
 
 # ------------------------- Utils --------------------------
 def parse_args():
@@ -62,7 +48,7 @@ def parse_args():
                         help='Dataset to train on. Defaults: gtu→GTU pickle, soundspaces→server RIR root')
     parser.add_argument('--data-path', type=str, default=None,
                         help='Dataset path. Defaults to GTU pickle or SoundSpaces RIR root based on --dataset-name')
-    parser.add_argument('--image-root', type=str, default=None,
+    parser.add_argument('--image-root', type=str, default='/dsi/gannot-lab/gannot-lab1/datasets/Replica_rendered/',
                         help='Replica_rendered/ root; omit to disable image conditioning')
     parser.add_argument('--rir-view-type', type=str, default='rgb', choices=['rgb', 'depth', 'none'],
                         help="Per-pair image type: 'rgb', 'depth', or 'none' to disable")
@@ -72,12 +58,12 @@ def parse_args():
                         default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/room_overviews/2views_top_mid_small_scenes.json')
     parser.add_argument('--scenes', type=str, nargs='+', default=None,
                         help='Restrict SoundSpaces to specific scenes (default: all 18)')
-    parser.add_argument('--use-rt60-condition', action='store_true',
+    parser.add_argument('--use-rt60-condition', type=str2bool, default=True,
                         help='Append precomputed RT60 to the SoundSpaces condition vector (requires 10_precompute_rt60.py)')
 
     # Training configuration
     parser.add_argument('--batch-size', type=int, default=8)
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--epochs', type=int, default=70)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--workers', type=int, default=10)
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
@@ -87,27 +73,24 @@ def parse_args():
     parser.add_argument('--use-eval', type=str2bool, default=True, help='Use evaluation dataset during training')
 
     # Audio / spectrogram
-    parser.add_argument('--sample-max-sec', type=int, default=1, help='Max RIR length in seconds')
+    parser.add_argument('--sample-max-sec', type=float, default=0.6, help='Max RIR length in seconds')
     parser.add_argument('--nSamples', type=int, default=None, help='Cap dataset size (None = all)')
     parser.add_argument('--hop-length', type=int, default=64)
     parser.add_argument('--n-fft', type=int, default=256)
     parser.add_argument('--sr-target', type=int, default=22050, help='Target sampling rate')
     parser.add_argument('--scale-rir', type=str2bool, default=True)
-    parser.add_argument('--apply-zero-tail', type=str2bool, default=False,
-                        help='Zero RIR values after -40 dB (requires --scale-rir)')
-    parser.add_argument('--db-cutoff', type=float, default=-40.0, help='dB cutoff for EDC cropping')
+    parser.add_argument('--apply-zero-tail', type=str2bool, default=False, help='Zero RIR values after -40 dB (requires --scale-rir)')
+    parser.add_argument('--db-cutoff', type=float, default=-40.0, help='dB threshold for EDC-based RIR scaling and tail zeroing')
 
     # Data split
     parser.add_argument('--train-ratio', type=float, default=0.7)
     parser.add_argument('--eval-ratio', type=float, default=0.15)
     parser.add_argument('--test-ratio', type=float, default=0.15)
-    parser.add_argument('--split-by-room', type=str2bool, default=False,
-                        help='Split by room ID to avoid data leakage (GTU only)')
+    parser.add_argument('--split-by-room', type=str2bool, default=False, help='Split by room ID to avoid data leakage (GTU only)')
     parser.add_argument('--random-seed', type=int, default=42)
 
     # Post-training evaluation
-    parser.add_argument('--post-train-eval', type=str2bool, default=False,
-                        help='Run full_model_eval.py on the finished run directory after training completes')
+    parser.add_argument('--post-train-eval', type=str2bool, default=True, help='Run full_model_eval.py on the finished run directory after training completes')
 
     args = parser.parse_args()
     if args.data_path is None:
@@ -115,7 +98,7 @@ def parse_args():
     return args
 
 def load_model_config(config_path, dataset_name, use_rt60_condition=False):
-    """Load and prepare model config. Returns (model_config, ie_config).
+    """Load and prepare model config. Returns (model_config, ie_config, src_trgt_dist_cond).
 
     Pops image_encoder_config into ie_config, converts image_size to tuple,
     and extracts src_trgt_dist_cond (consumed here to compute input_cond_dim;
@@ -282,7 +265,7 @@ def main():
     image_encoder = None
     if args.dataset_name == 'soundspaces' and args.image_root is not None:
         assert ie_config is not None, "image_encoder_config missing from model config JSON"
-        cross_attention_dim = model_config['block_out_channels'][-1]
+        cross_attention_dim = model_config['encoder_hidden_dims'][-1]
         image_encoder = ImageEncoder(out_dim=cross_attention_dim, **ie_config)
         print(f"\nImageEncoder: DA3 ViT-{ie_config['model_variant']}, out_dim={cross_attention_dim}, "
               f"~{image_encoder.n_tokens(n_img=1)} tokens per sample\n")

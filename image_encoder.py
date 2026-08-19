@@ -1,7 +1,7 @@
 """
 Image encoder for room visual conditioning in the RIR diffusion model.
 
-Extracts multi-scale patch tokens from a frozen DA3 ViT backbone and projects
+Extracts multi-scale patch tokens from a frozen DA2 ViT backbone and projects
 them to out_dim, ready to be concatenated with the scalar conditioning token
 for UNet cross-attention.
 
@@ -80,7 +80,7 @@ _DEFAULT_IMAGE_SIZE = (392, 518)
 
 class ImageEncoder(nn.Module):
     """
-    Frozen DA3 ViT backbone with configurable multi-layer feature extraction
+    Frozen DA2 ViT backbone with configurable multi-layer feature extraction
     and a final linear projection to out_dim.
 
     Output: [B, T, out_dim] cross-attention tokens ready for the diffusion model.
@@ -128,8 +128,8 @@ class ImageEncoder(nn.Module):
 
         # ── backbone ──────────────────────────────────────────────────────────
         from transformers import AutoModelForDepthEstimation
-        da3 = AutoModelForDepthEstimation.from_pretrained(_MODEL_IDS[model_variant])
-        self.backbone = da3.backbone        # Dinov2Model
+        da2 = AutoModelForDepthEstimation.from_pretrained(_MODEL_IDS[model_variant])
+        self.backbone = da2.backbone        # Dinov2Model
         for p in self.backbone.parameters():
             p.requires_grad_(False)
 

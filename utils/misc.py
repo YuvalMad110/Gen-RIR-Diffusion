@@ -206,18 +206,20 @@ def extract_losses_from_log(log_path):
     losses = [float(match) for match in re.findall(r"Loss:\s+([0-9.]+)", content)]
     return losses
 
-def resolve_model_dir(path_arg: str) -> Path:
-    """Resolve a model path argument to the full run directory (containing run_config.json).
+def get_full_path(path_arg: str, subdir: str) -> Path:
+    """Return a full Path for path_arg, expanding bare names under the project root.
 
-    Accepts:
-      (a) Full/relative path to the run folder  → returned as Path as-is
-      (b) Bare folder name (e.g. 'Dec24_20-02-59_dsief07')
-          → expanded to <project_root>/outputs/finished/<name>/
+    If path_arg is not absolute and has exactly one part, returns
+    <project_root>/<subdir>/<path_arg>.  Otherwise returns Path(path_arg) as-is.
+
+    Examples:
+        get_full_path('Jun08_19-28-08_dsief06', 'outputs/finished')
+        get_full_path('model_config_VisualCond.json', 'config')
     """
     p = Path(path_arg)
     if not p.is_absolute() and len(p.parts) == 1:
         project_root = Path(__file__).parent.parent
-        p = project_root / "outputs" / "finished" / path_arg
+        p = project_root / subdir / path_arg
     return p
 
 
