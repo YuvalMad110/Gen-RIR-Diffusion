@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from utils.misc import save_metric, get_timestamped_logdir, plot_signals
 from utils.signal_proc import waveform_to_spectrogram
+from utils.dataset_utils import build_condition_tensor
 from tqdm import tqdm
 from diffusers import DDPMScheduler
 
@@ -32,7 +33,8 @@ class DiffusionTrainer():
                  accelerator=None,
                  n_fft=256,
                  hop_length=64,
-                 run_header=""):
+                 run_header="",
+                 src_trgt_dist_cond=False):
         # -------- Cfg --------
         self.model = model
         self.optimizer = optimizer
@@ -47,6 +49,7 @@ class DiffusionTrainer():
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.run_header = run_header
+        self.src_trgt_dist_cond = src_trgt_dist_cond
         # Setup Accelerator for DDP/AMP
         self.accelerator = accelerator
         if self.accelerator.is_main_process:
@@ -172,7 +175,8 @@ class DiffusionTrainer():
             'room_dim'    — [B, 3]
             'mic_loc'     — [B, 3]
             'speaker_loc' — [B, 3]
-            'rt60'        — [B]         (GTU only)
+            'rt60'        — [B]         (when use_rt60_condition=True)
+            'dist'        — [B]         (when src_trgt_dist_cond=True; mic–speaker Euclidean distance)
             'images'      — [B, N, 3, H, W]  (SoundSpaces only, optional)
         """
         # ---- prepare spectrogram ----
@@ -180,10 +184,7 @@ class DiffusionTrainer():
         rir = waveform_to_spectrogram(rir, hop_length=self.hop_length, n_fft=self.n_fft)  # [B, 2, F, T]
 
         # ---- build scalar conditioning ----
-        parts = [batch['room_dim'], batch['mic_loc'], batch['speaker_loc']]
-        if 'rt60' in batch:
-            parts.append(batch['rt60'].unsqueeze(1))
-        condition = torch.cat(parts, dim=1).to(self.device).float()       # [B, 9] or [B, 10]
+        condition = build_condition_tensor(batch, self.device, self.src_trgt_dist_cond)
 
         # ---- optional images ----
         images = batch['images'].to(self.device) if 'images' in batch else None

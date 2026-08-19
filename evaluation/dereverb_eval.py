@@ -96,9 +96,10 @@ if str(EVAL_DIR) not in sys.path:
 # --- Gen-RIR-Diffusion imports -----------------------------------------------
 from utils.inference_data_loading import (
     load_pretrained_model, data_params_from_run_config,
-    build_test_dataloader, _normalize_batch_to_dict, build_condition_tensor,
+    build_test_dataloader, _normalize_batch_to_dict,
 )
-from utils.misc import str2bool, resolve_model_dir
+from utils.dataset_utils import build_condition_tensor
+from utils.misc import str2bool, get_full_path
 from utils.signal_proc import (
     spectrogram_to_waveform,
     undo_rir_scaling,
@@ -598,7 +599,7 @@ def main():
     args = parse_args()
 
     # ── Resolve model directory ───────────────────────────────────────────────
-    model_dir = resolve_model_dir(args.diffusion_model_path)
+    model_dir = get_full_path(args.diffusion_model_path, "outputs/finished")
 
     # ── Debug mode ────────────────────────────────────────────────────────────
     if args.debug_mode:

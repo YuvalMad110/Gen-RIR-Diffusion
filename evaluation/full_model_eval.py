@@ -30,10 +30,11 @@ if project_root not in sys.path:
 from utils.signal_proc import spectrogram_to_waveform, undo_rir_scaling, calculate_edc, estimate_decay_k_factor
 from utils.inference_data_loading import (
     load_pretrained_model, data_params_from_run_config,
-    build_test_dataloader, build_condition_tensor, _normalize_batch_to_dict,
+    build_test_dataloader, _normalize_batch_to_dict,
 )
-from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_t60_batch, DEFAULT_T60_FIT_RANGE
-from utils.misc import get_israel_time, resolve_model_dir
+from utils.dataset_utils import build_condition_tensor
+from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_t60_batch, DEFAULT_T60_FIT_RANGE, DEFAULT_OCTAVE_BANDS
+from utils.misc import get_israel_time, get_full_path
 from utils.evaluation import select_representative_samples
 from utils.evaluation_reporting import save_evaluation_summary, save_detailed_metrics_table, save_selected_samples
 from utils.visualization import (
@@ -96,7 +97,7 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signa
                 rir_np = rirs[i].cpu().numpy() if torch.is_tensor(rirs[i]) else rirs[i]
                 real_waveforms.append(rir_np.squeeze())
 
-            conditions = build_condition_tensor(batch, device)
+            conditions = build_condition_tensor(batch, device, src_trgt_dist_cond)
             conditions_np = conditions.cpu().numpy()
 
             # Optional image conditioning
@@ -105,7 +106,7 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signa
             # --- Generate baseline RIRs (synthetic) ---
             baseline_waveforms = None
             if use_baseline:
-                rt60_estimates = compute_t60_batch(real_waveforms, sr, args.t60_fit_range) if conditions_np.shape[1] <= 9 else None
+                rt60_estimates = None if data_info.get('use_rt60_condition', False) else compute_t60_batch(real_waveforms, sr, args.t60_fit_range)
                 baseline_waveforms = generate_synthetic_rirs_batch(
                     conditions_np, sr, max_length_samples=None, method=args.baseline_method, verbose=False, rt60_estimates=rt60_estimates, dataset_name=data_info.get('dataset_name', 'gtu'))
 
@@ -214,6 +215,7 @@ def main():
     print("\nLoading model...")
     model, run_config = load_pretrained_model(model_dir, device)
     data_info = data_params_from_run_config(run_config)
+    src_trgt_dist_cond = run_config['model_config']['src_trgt_dist_cond']
     args.num_inference_steps = args.num_inference_steps or model.n_timesteps
     args.model_path = str(model_dir / 'model_best.pth.tar')  # for summary reporting
 
@@ -264,7 +266,7 @@ def main():
 
     # ---------- Run evaluation ----------
     aggregate, all_metrics, all_samples, baseline_aggregate, baseline_all_metrics = evaluate_test_set(
-        model, test_dataloader, device, data_info, args, dry_signal
+        model, test_dataloader, device, data_info, args, src_trgt_dist_cond, dry_signal
     )
     use_baseline = args.baseline_method != 'none'
 

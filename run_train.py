@@ -117,7 +117,9 @@ def parse_args():
 def load_model_config(config_path, dataset_name, use_rt60_condition=False):
     """Load and prepare model config. Returns (model_config, ie_config).
 
-    Pops image_encoder_config into ie_config and converts image_size to tuple.
+    Pops image_encoder_config into ie_config, converts image_size to tuple,
+    and extracts src_trgt_dist_cond (consumed here to compute input_cond_dim;
+    not a RIRDiffusionModel parameter).
     """
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Model configuration file not found: {config_path}")
@@ -125,15 +127,17 @@ def load_model_config(config_path, dataset_name, use_rt60_condition=False):
         model_config = json.load(f)
     # Strip comment keys (any key starting with "_" is treated as a comment)
     model_config = {k: v for k, v in model_config.items() if not k.startswith('_')}
-    # input_cond_dim: SoundSpaces is 9-dim (no RT60) unless --use-rt60-condition adds it; GTU is always 10-dim
+    # input_cond_dim: base is 9 (SoundSpaces) or 10 (GTU); each active flag adds 1
+    src_trgt_dist_cond = model_config.pop('src_trgt_dist_cond')
     if dataset_name == 'soundspaces':
-        model_config['input_cond_dim'] = 10 if use_rt60_condition else 9
+        base_dim = 10 if use_rt60_condition else 9
     else:
-        model_config['input_cond_dim'] = 10
+        base_dim = 10
+    model_config['input_cond_dim'] = base_dim + (1 if src_trgt_dist_cond else 0)
     ie_config = model_config.pop('image_encoder_config', None)
     if ie_config and 'image_size' in ie_config:
         ie_config['image_size'] = tuple(ie_config['image_size'])
-    return model_config, ie_config
+    return model_config, ie_config, src_trgt_dist_cond
 
 def num_workers_test(dataset, nWorkers=[0,1,4,8,10, 12, 14, 16,18], batch_size=16):
     """
@@ -224,7 +228,7 @@ def main():
         args.split_by_room = False
 
     # ---------- Model config ----------
-    model_config, ie_config = load_model_config(args.model_config, args.dataset_name, args.use_rt60_condition)
+    model_config, ie_config, src_trgt_dist_cond = load_model_config(args.model_config, args.dataset_name, args.use_rt60_condition)
 
     # ---------- Load datasets ----------
     print("\n----------- Loading datasets... -----------\n")
@@ -286,6 +290,7 @@ def main():
         image_encoder=image_encoder,
         **model_config,
     )
+    model.config['src_trgt_dist_cond'] = src_trgt_dist_cond
     print("\n---------- Initialized model ----------\n")
     
     # Scheduler 
@@ -308,6 +313,7 @@ def main():
         n_fft=args.n_fft,
         hop_length=args.hop_length,
         run_header=run_header,
+        src_trgt_dist_cond=src_trgt_dist_cond,
     )
 
     # ---------- Train ----------

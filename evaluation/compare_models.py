@@ -36,8 +36,9 @@ if project_root not in sys.path:
 from utils.signal_proc import spectrogram_to_waveform, undo_rir_scaling, calculate_edc, estimate_decay_k_factor
 from utils.inference_data_loading import (
     load_pretrained_model, data_params_from_run_config,
-    build_test_dataloader, build_condition_tensor,
+    build_test_dataloader,
 )
+from utils.dataset_utils import build_condition_tensor
 from utils.acoustic_metrics import evaluate_rir_pair, align_rir_lengths, compute_edc, DEFAULT_T60_FIT_RANGE
 from utils.misc import get_israel_time, resolve_model_dir
 
@@ -98,6 +99,7 @@ def run_inference_for_pair(
     device: torch.device,
     data_info: Dict,
     args,
+    src_trgt_dist_cond: bool,
 ) -> np.ndarray:
     """Run DDIM inference for a single batch (B=1) and return the generated waveform.
 
@@ -109,7 +111,7 @@ def run_inference_for_pair(
     n_fft = data_info['n_fft']
     scale_rir = data_info.get('scale_rir', False)
 
-    conditions = build_condition_tensor(batch, device)
+    conditions = build_condition_tensor(batch, device, src_trgt_dist_cond)
 
     has_image_encoder = (
         hasattr(model, 'image_encoder') and model.image_encoder is not None
@@ -486,6 +488,9 @@ def main():
     print("Loading Model II...")
     model_2, run_config_2 = load_pretrained_model(model_2_dir, device)
 
+    src_trgt_dist_cond_1 = run_config_1['model_config']['src_trgt_dist_cond']
+    src_trgt_dist_cond_2 = run_config_2['model_config']['src_trgt_dist_cond']
+
     data_info = data_params_from_run_config(run_config_1)
 
     # Split compatibility check
@@ -543,12 +548,12 @@ def main():
         # Reference waveform
         rirs = batch['rir']
         ref_wave = rirs[0].cpu().numpy().squeeze() if torch.is_tensor(rirs[0]) else np.array(rirs[0]).squeeze()
-        condition_np = build_condition_tensor(batch, device)[0].cpu().numpy()
+        condition_np = build_condition_tensor(batch, device, src_trgt_dist_cond_1)[0].cpu().numpy()
 
         print(f"    Inference — Model I...")
-        gen_wave_1 = run_inference_for_pair(model_1, batch, device, data_info, args)
+        gen_wave_1 = run_inference_for_pair(model_1, batch, device, data_info, args, src_trgt_dist_cond_1)
         print(f"    Inference — Model II...")
-        gen_wave_2 = run_inference_for_pair(model_2, batch, device, data_info, args)
+        gen_wave_2 = run_inference_for_pair(model_2, batch, device, data_info, args, src_trgt_dist_cond_2)
 
         # Align lengths
         gen_1, ref_a = align_rir_lengths(gen_wave_1, ref_wave, mode='truncate')

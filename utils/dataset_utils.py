@@ -1,5 +1,33 @@
+import torch
 import numpy as np
 from sklearn.model_selection import train_test_split
+
+
+def build_condition_tensor(batch, device: torch.device, src_trgt_dist_cond: bool) -> torch.Tensor:
+    """Build the scalar conditioning tensor from a dataloader batch.
+
+    Handles both dict batches (SoundSpaces collate_fn) and tuple batches (GTU default collate).
+    When src_trgt_dist_cond is True, appends the Euclidean distance between speaker and mic
+    as an explicit conditioning scalar.
+    """
+    if isinstance(batch, dict):
+        parts = [batch['room_dim'], batch['mic_loc'], batch['speaker_loc']]
+        if 'rt60' in batch:
+            parts.append(batch['rt60'].unsqueeze(1))
+        if src_trgt_dist_cond:
+            dist = torch.norm(
+                batch['speaker_loc'].float() - batch['mic_loc'].float(), dim=1, keepdim=True
+            )
+            parts.append(dist)
+        return torch.cat(parts, dim=1).float().to(device)
+    else:
+        # GTU tuple: (rirs, room_dims, mic_locs, speaker_locs, rt60s)
+        _, room_dims, mic_locs, speaker_locs, rt60s = batch
+        parts = [room_dims, mic_locs, speaker_locs, rt60s.unsqueeze(1)]
+        if src_trgt_dist_cond:
+            dist = torch.norm(speaker_locs.float() - mic_locs.float(), dim=1, keepdim=True)
+            parts.append(dist)
+        return torch.cat(parts, dim=1).float().to(device)
 
 
 def _greedy_group_split(unique_groups, group_sizes, train_ratio, eval_ratio, test_ratio):

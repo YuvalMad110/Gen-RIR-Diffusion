@@ -6,7 +6,6 @@ Functions list:
 - data_params_from_run_config: Extract a data_info-compatible dict from run_config['args'].
 - load_model_and_data_info: Legacy loader for old GTU checkpoints (no run_config.json).
 - build_test_dataloader: Reconstruct the test-split DataLoader from run_config or data_info.
-- build_condition_tensor: Build the scalar conditioning tensor from a batch dict.
 - load_dataset_conditions: Load conditions and RIRs from dataset (run_inference.py helper).
 """
 
@@ -233,25 +232,6 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
         )
 
     return test_dataset, test_dataloader
-
-
-def build_condition_tensor(batch, device: torch.device) -> torch.Tensor:
-    """Build the scalar conditioning tensor from a dataloader batch.
-
-    Handles both dict batches (SoundSpaces collate_fn) and tuple batches (GTU default collate).
-
-    Returns:
-        Tensor of shape [B, 9] for SoundSpaces (no RT60) or [B, 10] for GTU (with RT60).
-    """
-    if isinstance(batch, dict):
-        parts = [batch['room_dim'], batch['mic_loc'], batch['speaker_loc']]
-        if 'rt60' in batch:
-            parts.append(batch['rt60'].unsqueeze(1))
-        return torch.cat(parts, dim=1).float().to(device)
-    else:
-        # GTU tuple: (rirs, room_dims, mic_locs, speaker_locs, rt60s)
-        _, room_dims, mic_locs, speaker_locs, rt60s = batch
-        return torch.cat([room_dims, mic_locs, speaker_locs, rt60s.unsqueeze(1)], dim=1).float().to(device)
 
 
 def _normalize_batch_to_dict(batch) -> Dict:

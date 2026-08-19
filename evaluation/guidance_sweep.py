@@ -33,8 +33,9 @@ if project_root not in sys.path:
 from utils.signal_proc import spectrogram_to_waveform, undo_rir_scaling, calculate_edc, estimate_decay_k_factor
 from utils.inference_data_loading import (
     load_pretrained_model, data_params_from_run_config,
-    build_test_dataloader, build_condition_tensor, _normalize_batch_to_dict,
+    build_test_dataloader, _normalize_batch_to_dict,
 )
+from utils.dataset_utils import build_condition_tensor
 from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_edc
 from utils.misc import get_israel_time
 import matplotlib.pyplot as plt
@@ -58,14 +59,14 @@ RANKING_METRICS = {
 # Batch processing
 # =============================================================================
 
-def prepare_batch(batch, data_info, device):
+def prepare_batch(batch, data_info, device, src_trgt_dist_cond: bool = False):
     """Extract real waveforms, conditions, and k_factors from a dataloader batch.
 
     Handles both GTU tuple batches and SoundSpaces dict batches.
 
     Returns:
         real_waveforms: list of 1D numpy arrays
-        conditions: torch tensor [B, 9] or [B, 10] on device
+        conditions: torch tensor [B, cond_dim] on device
         k_factors: torch tensor [B] or None (if no scaling)
     """
     batch = _normalize_batch_to_dict(batch)
@@ -75,7 +76,7 @@ def prepare_batch(batch, data_info, device):
     real_waveforms = [rirs[i].cpu().numpy().squeeze() if torch.is_tensor(rirs[i]) else rirs[i].squeeze()
                       for i in range(batch_size)]
 
-    conditions = build_condition_tensor(batch, device)
+    conditions = build_condition_tensor(batch, device, src_trgt_dist_cond)
 
     k_factors = None
     if data_info.get('scale_rir', False):
@@ -189,7 +190,7 @@ def select_global_medians(results, top_scales, metric_key='t60', n=3, exclude_in
 # =============================================================================
 
 def regenerate_selected(model, test_dataset, sample_indices, top_scales, data_info, device,
-                        sample_size, num_inference_steps, use_ddim):
+                        sample_size, num_inference_steps, use_ddim, src_trgt_dist_cond: bool = False):
     """Regenerate waveforms for selected samples at top scales.
 
     Returns:
@@ -199,7 +200,7 @@ def regenerate_selected(model, test_dataset, sample_indices, top_scales, data_in
     from torch.utils.data import default_collate
 
     batch = default_collate([test_dataset[i] for i in sample_indices])
-    real_waveforms, conditions, k_factors = prepare_batch(batch, data_info, device)
+    real_waveforms, conditions, k_factors = prepare_batch(batch, data_info, device, src_trgt_dist_cond)
 
     batch_dict = _normalize_batch_to_dict(batch)
     images = batch_dict['images'].to(device) if 'images' in batch_dict else None
@@ -511,6 +512,7 @@ def main():
     print("Loading model...")
     model, run_config = load_pretrained_model(model_dir, device)
     data_info = data_params_from_run_config(run_config)
+    src_trgt_dist_cond = run_config['model_config'].get('src_trgt_dist_cond', False)
     args.num_inference_steps = args.num_inference_steps or model.n_timesteps
     args.model_path = str(model_dir / 'model_best.pth.tar')  # for summary reporting
 
@@ -563,7 +565,7 @@ def main():
     print(f"Running sweep: {len(scales)} scales, {len(test_dataset)} samples, {len(test_dataloader)} batches...")
     with torch.no_grad():
         for batch in tqdm(test_dataloader, desc="Sweep"):
-            real_waveforms, conditions, k_factors = prepare_batch(batch, data_info, device)
+            real_waveforms, conditions, k_factors = prepare_batch(batch, data_info, device, src_trgt_dist_cond)
             batch_dict = _normalize_batch_to_dict(batch)
             images = batch_dict['images'].to(device) if 'images' in batch_dict else None
 
@@ -602,7 +604,7 @@ def main():
     print("Regenerating waveforms for selected samples...")
     ref_waveforms, gen_waveforms = regenerate_selected(
         model, test_dataset, all_selected, top_scales, data_info, device,
-        sample_size, args.num_inference_steps, args.use_ddim)
+        sample_size, args.num_inference_steps, args.use_ddim, src_trgt_dist_cond)
 
     plot_sweep_samples(all_selected, labels, top_scales, ref_waveforms, gen_waveforms,
                        sr, save_path / 'sweep_samples.png')

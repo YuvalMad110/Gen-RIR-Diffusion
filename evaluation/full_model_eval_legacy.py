@@ -30,9 +30,9 @@ from data.rir_dataset import load_rir_dataset
 from utils.signal_proc import spectrogram_to_waveform, undo_rir_scaling, calculate_edc, estimate_decay_k_factor
 from utils.inference_data_loading import (
     load_pretrained_model, load_model_and_data_info,
-    data_params_from_run_config, build_test_dataloader, build_condition_tensor,
-    _normalize_batch_to_dict,
+    data_params_from_run_config, build_test_dataloader, _normalize_batch_to_dict,
 )
+from utils.dataset_utils import build_condition_tensor
 from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths
 from utils.misc import get_israel_time
 from utils.evaluation import select_representative_samples
