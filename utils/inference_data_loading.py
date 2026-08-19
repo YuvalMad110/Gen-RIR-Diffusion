@@ -56,6 +56,7 @@ def load_pretrained_model(run_dir: str, device: torch.device):
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
 
     model_config = run_config['model_config']
+    model_config.setdefault('pos_encoder_cfg', None)  # old checkpoints: no positional encoder
 
     # Instantiate ImageEncoder only when image conditioning was active during training
     # (image_root=None means the encoder was never used even if image_encoder_config is present)

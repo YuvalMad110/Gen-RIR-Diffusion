@@ -10,6 +10,7 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from utils.misc import save_metric, get_timestamped_logdir
+from utils.fourier_encoder import FourierFeatureEncoder
 
 from tqdm import tqdm
 from diffusers import DDPMScheduler, DDIMScheduler
@@ -101,6 +102,8 @@ class RIRDiffusionModel(torch.nn.Module):
                  image_encoder: Optional['ImageEncoder'] = None,
                  fusion_enable: bool = True,
                  image_fusion: str = 'cross_attn',
+                 # Positional encoder for scalar condition vector
+                 pos_encoder_cfg: Optional[dict] = None,
                  # Guidance parameters (CFG - Classifier-Free Guidance)
                  guidance_enabled: bool = False,
                  guidance_dropout_prob: float = 0.1,
@@ -139,6 +142,10 @@ class RIRDiffusionModel(torch.nn.Module):
             fusion_enable:  When False and image_fusion='cross_attn', skip the FusionBlock
                             and concatenate the scalar token with image tokens directly.
                             Default True preserves the standard behaviour.
+            pos_encoder_cfg: Optional dict controlling the Fourier feature positional encoder
+                            applied before the condition MLP. Keys: enable (bool), encode_mode
+                            ('full'), n_freqs, log_scale, include_raw, max_freq_log2, input_norm.
+                            None or enable=False disables the encoder (default behaviour).
 
             Guidance parameters (CFG - Classifier-Free Guidance):
             guidance_enabled:      Whether to enable guidance dropout during training
@@ -164,6 +171,17 @@ class RIRDiffusionModel(torch.nn.Module):
         norm_num_groups, use_cross_attention, down_block_types, up_block_types, mid_block_type = self._auto_configure_model_params(
             block_out_channels, layers_per_block, use_cross_attention, norm_num_groups, use_mid_block)
         
+        # -------- Positional encoder (optional) --------
+        self.pos_encoder = None
+        mlp_input_dim = input_cond_dim
+        if pos_encoder_cfg is not None and pos_encoder_cfg.get('enable', False):
+            self.pos_encoder = FourierFeatureEncoder(
+                cond_dim=input_cond_dim,
+                **{k: v for k, v in pos_encoder_cfg.items() if k != 'enable'}
+            ).to(self.device)
+            mlp_input_dim = self.pos_encoder.output_dim
+            pos_encoder_cfg = self.pos_encoder.to_config()  # freeze complete config incl. defaults
+
         # -------- Conditioning encoder --------
         if use_cond_encoder:
             # Build encoder layers
@@ -229,6 +247,7 @@ class RIRDiffusionModel(torch.nn.Module):
             'use_image_conditioning': image_encoder is not None,
             'fusion_enable': fusion_enable,
             'image_fusion': image_fusion if image_encoder is not None else None,
+            'pos_encoder_cfg': self.pos_encoder.to_config() if self.pos_encoder is not None else None,
             'guidance_enabled': guidance_enabled,
             'guidance_dropout_prob': guidance_dropout_prob,
             'in_channels': in_channels,
@@ -245,7 +264,7 @@ class RIRDiffusionModel(torch.nn.Module):
         'sample_size', 'n_timesteps',
         'block_out_channels', 'layers_per_block', 'use_cross_attention',
         'attention_head_dim', 'norm_num_groups', 'use_mid_block', 'use_cond_encoder',
-        'encoder_hidden_dims', 'input_cond_dim', 'image_fusion', 'fusion_enable', 'guidance_enabled',
+        'encoder_hidden_dims', 'input_cond_dim', 'image_fusion', 'fusion_enable', 'pos_encoder_cfg', 'guidance_enabled',
         'guidance_dropout_prob', 'in_channels', 'out_channels'
     }
 
@@ -343,6 +362,8 @@ class RIRDiffusionModel(torch.nn.Module):
         Returns:
             Encoded conditioning tensor of shape [B, 1, cross_attention_dim]
         """
+        if self.pos_encoder is not None:
+            cond = self.pos_encoder(cond)
         if self.use_cond_encoder:
             return self.condition_encoder(cond).unsqueeze(1)
         else:
