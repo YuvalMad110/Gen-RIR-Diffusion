@@ -99,6 +99,7 @@ class RIRDiffusionModel(torch.nn.Module):
                  input_cond_dim: int = 10,
                  # Image conditioning parameters
                  image_encoder: Optional['ImageEncoder'] = None,
+                 fusion_enable: bool = True,
                  image_fusion: str = 'cross_attn',
                  # Guidance parameters (CFG - Classifier-Free Guidance)
                  guidance_enabled: bool = False,
@@ -135,6 +136,9 @@ class RIRDiffusionModel(torch.nn.Module):
                             the UNet.  'concat' concatenates them directly;
                             'cross_attn' (default) inserts a FusionBlock where the scalar token
                             attends to image tokens first (useful for ablation studies).
+            fusion_enable:  When False and image_fusion='cross_attn', skip the FusionBlock
+                            and concatenate the scalar token with image tokens directly.
+                            Default True preserves the standard behaviour.
 
             Guidance parameters (CFG - Classifier-Free Guidance):
             guidance_enabled:      Whether to enable guidance dropout during training
@@ -186,7 +190,7 @@ class RIRDiffusionModel(torch.nn.Module):
         if image_encoder is not None:
             assert image_encoder.out_dim == cross_attention_dim, f"image_encoder.out_dim ({image_encoder.out_dim}) must equal cross_attention_dim ({cross_attention_dim})"
             self.image_encoder = image_encoder.to(self.device)
-            if image_fusion == 'cross_attn':
+            if image_fusion == 'cross_attn' and fusion_enable:
                 self.fusion_block = FusionBlock(dim=cross_attention_dim).to(self.device)
 
         # -------- Base UNet Model --------
@@ -222,6 +226,7 @@ class RIRDiffusionModel(torch.nn.Module):
             'encoder_hidden_dims': encoder_hidden_dims if use_cond_encoder else None,
             'input_cond_dim': input_cond_dim,
             'use_image_conditioning': image_encoder is not None,
+            'fusion_enable': fusion_enable,
             'image_fusion': image_fusion if image_encoder is not None else None,
             'guidance_enabled': guidance_enabled,
             'guidance_dropout_prob': guidance_dropout_prob,
@@ -239,7 +244,7 @@ class RIRDiffusionModel(torch.nn.Module):
         'sample_size', 'n_timesteps',
         'block_out_channels', 'layers_per_block', 'use_cross_attention',
         'attention_head_dim', 'norm_num_groups', 'use_mid_block', 'use_cond_encoder',
-        'encoder_hidden_dims', 'input_cond_dim', 'image_fusion', 'guidance_enabled',
+        'encoder_hidden_dims', 'input_cond_dim', 'image_fusion', 'fusion_enable', 'guidance_enabled',
         'guidance_dropout_prob', 'in_channels', 'out_channels'
     }
 
