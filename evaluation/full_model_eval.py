@@ -42,13 +42,15 @@ from utils.visualization import (
     plot_selected_rir_samples, plot_edc_per_band_for_selected
 )
 from utils.synthetic_rir import generate_synthetic_rirs_batch
+import soundfile as sf
+from utils.audio_processing import convolve_with_rir
 
 
 # =============================================================================
 # Evaluation Core
 # =============================================================================
 
-def evaluate_test_set(model, test_dataloader, device, data_info, args, dry_signal=None):
+def evaluate_test_set(model, test_dataloader, device, data_info, args, src_trgt_dist_cond, dry_signal=None):
     """Run evaluation over the entire test set.
 
     Handles both GTU tuple batches and SoundSpaces dict batches (with optional images).
@@ -187,7 +189,7 @@ def parse_args():
     parser.add_argument("--num_inference_steps", type=int, default=50, help="Denoising steps")
     parser.add_argument("--use_ddim", action="store_true", help="Use DDIM sampling")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for evaluation")
-    parser.add_argument("--octave_bands", type=float, nargs='+', default=[125, 250, 500, 1000, 2000, 4000])
+    parser.add_argument("--octave_bands", type=float, nargs='+', default=DEFAULT_OCTAVE_BANDS)
     parser.add_argument("--save_path", type=str, default=None, help="Output directory")
     parser.add_argument("--n_examples", type=int, default=5, help="Number of example pairs to visualize")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu)")
@@ -195,17 +197,51 @@ def parse_args():
     parser.add_argument("--debug_mode", type=bool, default=False, help="Debug mode: fast run")
     parser.add_argument("--speech_path", type=str, default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/data/1195-130164-0010.wav',
                         help="Path to clean speech for reverbed LSD computation")
-    parser.add_argument("--baseline_method", type=str, default='habets', choices=['habets', 'pra', 'none'],
-                        help="Synthetic RIR baseline method")
+    parser.add_argument("--baseline_method", type=str, default='none', choices=['habets', 'pra', 'none'],
+                        help="Synthetic RIR baseline method (habets is preferred over pra)")
     parser.add_argument("--t60_fit_range", type=float, nargs=2, default=list(DEFAULT_T60_FIT_RANGE),
                         help="dB window for RT60 EDC slope fit: upper lower (e.g. -5 -35)")
     return parser.parse_args()
 
 
+def save_reverb_speech(selected_samples: dict, dry_signal: np.ndarray, sr: int, save_path: Path) -> None:
+    """Convolve dry_signal with median, best, and worst real/generated RIRs and save 7 WAV files.
+
+    Output: save_path/reverb_speech/{variant}.wav
+    Variants: clean, median_real, median_gen, best_real, best_gen, worst_real, worst_gen.
+    Uses the first sample from 't60_perc' median, best, and worst categories.
+    """
+    t60_samples = selected_samples.get('t60_perc', {})
+    median_entry = t60_samples.get('median', [{}])[0].get('sample')
+    best_entry   = t60_samples.get('best',   [{}])[0].get('sample')
+    worst_entry  = t60_samples.get('worst',  [{}])[0].get('sample')
+
+    if median_entry is None or best_entry is None:
+        print("  No selected samples available for reverb speech saving.")
+        return
+
+    reverb_dir = save_path / 'reverb_speech'
+    reverb_dir.mkdir(exist_ok=True)
+
+    sf.write(reverb_dir / 'clean.wav', dry_signal, sr)
+
+    entries = [('median', median_entry), ('best', best_entry)]
+    if worst_entry is not None:
+        entries.append(('worst', worst_entry))
+
+    for label, sample in entries:
+        real_rev = convolve_with_rir(dry_signal, sample['reference'], normalize_rir=False, normalize_output=True)
+        gen_rev  = convolve_with_rir(dry_signal, sample['generated'], normalize_rir=False, normalize_output=True)
+        sf.write(reverb_dir / f'{label}_real.wav', real_rev, sr)
+        sf.write(reverb_dir / f'{label}_gen.wav',  gen_rev,  sr)
+
+    print(f"  Reverb speech saved to: {reverb_dir}")
+
+
 def main():
     args = parse_args()
 
-    model_dir = resolve_model_dir(args.model_dir)
+    model_dir = get_full_path(args.model_dir, "outputs/finished")
 
     # Setup device
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -301,10 +337,14 @@ def main():
     model_name = model_dir.name
     for metric_name in selected_samples.keys():
         plot_selected_rir_samples(selected_samples, metric_name, data_info['sr_target'],
-                                  model_name, args.num_inference_steps, model.n_timesteps, save_path)
+                                  model_name, args.num_inference_steps, model.n_timesteps, save_path,
+                                  use_rt60_condition=data_info['use_rt60_condition'])
 
         plot_edc_per_band_for_selected(selected_samples, metric_name, data_info['sr_target'],
                                         args.octave_bands, save_path)
+
+    print("\nGenerating reverb speech samples...")
+    save_reverb_speech(selected_samples, dry_signal, data_info['sr_target'], save_path)
 
     print(f"\n✓ Evaluation complete! Results saved to: {save_path}")
 

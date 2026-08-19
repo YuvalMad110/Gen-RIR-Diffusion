@@ -310,7 +310,7 @@ def main():
     for metric_name in selected_samples.keys():
         plot_selected_rir_samples(
             selected_samples, metric_name, sr,
-            model_name, args.num_inference_steps, model.n_timesteps, save_path
+            model_name, args.num_inference_steps, model.n_timesteps, save_path, use_rt60_condition=True
         )
         plot_edc_per_band_for_selected(
             selected_samples, metric_name, sr,

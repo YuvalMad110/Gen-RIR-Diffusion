@@ -37,7 +37,7 @@ from utils.inference_data_loading import (
 )
 from utils.dataset_utils import build_condition_tensor
 from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_edc
-from utils.misc import get_israel_time
+from utils.misc import get_israel_time, get_full_path
 import matplotlib.pyplot as plt
 
 
@@ -495,7 +495,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    model_dir = Path(args.model_dir)
+    model_dir = get_full_path(args.model_dir, 'outputs/finished')
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
 
     # Build list of scales

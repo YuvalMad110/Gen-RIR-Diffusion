@@ -40,8 +40,8 @@ def _format_comparison_table(aggregate, baseline_aggregate, diff_all_metrics, ba
         ('T60 Perc Error',   't60_perc_error',  '%',  lambda m: m['t60']['perc']),
         ('EDT Error',        'edt_error',       's',  lambda m: abs(m['edt']['error']) if m['edt']['error'] is not None and not np.isnan(m['edt']['error']) else np.nan),
         ('DRR Abs Error',    'drr_abs_error',   'dB', lambda m: abs(m['drr']['error']) if m['drr']['error'] is not None and not np.isnan(m['drr']['error']) else np.nan),
-        ('C50 Error',        'c50_error',       'dB', lambda m: abs(m['c50']['error']) if m['c50']['error'] is not None and not np.isnan(m['c50']['error']) else np.nan),
-        ('C80 Error',        'c80_error',       'dB', lambda m: abs(m['c80']['error']) if m['c80']['error'] is not None and not np.isnan(m['c80']['error']) else np.nan),
+        ('C50 MAE',          'c50_abs_error',   'dB', lambda m: abs(m['c50']['error']) if m['c50']['error'] is not None and not np.isnan(m['c50']['error']) else np.nan),
+        ('C80 MAE',          'c80_abs_error',   'dB', lambda m: abs(m['c80']['error']) if m['c80']['error'] is not None and not np.isnan(m['c80']['error']) else np.nan),
         ('LSD (broadband)',  'lsd',             'dB', lambda m: m['lsd']['broadband']),
         ('EDC Distance',     'edc_distance',    'dB²',lambda m: m['edc_distance']['broadband']),
         ('Cosine Similarity','cosine_similarity','',   lambda m: m['cosine_similarity']),
@@ -93,6 +93,32 @@ def _format_comparison_table(aggregate, baseline_aggregate, diff_all_metrics, ba
     return lines
 
 
+def _format_t60_per_band_section(aggregate, data_info):
+    """Return summary lines for T60 per-band % error, including a reliability warning."""
+    band_agg = aggregate.get('t60_band_perc_error', {})
+    if not band_agg:
+        return []
+
+    def fc_label(fc):
+        return f"{int(fc)} Hz" if fc < 1000 else f"{int(fc / 1000)} kHz"
+
+    lines = ["", "-" * 70, "T60 PER-BAND % ERROR (abs, mean ± std)", "-" * 70]
+    sorted_bands = sorted(band_agg)
+    for fc in sorted_bands:
+        lines.append(format_metric_line(f"T60 {fc_label(fc):6s} %", band_agg[fc], '%'))
+
+    # Reliability warning: flag bands where RIR is too short for the frequency
+    MIN_CYCLES = 20
+    rir_duration = data_info.get('sample_max_sec') if data_info else None
+    if rir_duration:
+        for fc in sorted_bands:
+            n_cycles = rir_duration * fc
+            if n_cycles < MIN_CYCLES:
+                lines.append(f"  ! WARNING: {fc_label(fc)} — only {n_cycles:.0f} cycles in "
+                             f"{rir_duration}s RIR (< {MIN_CYCLES}); T60 estimate may be unreliable.")
+    return lines
+
+
 def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_train_steps, save_path,
                             title="RIR DIFFUSION MODEL - EVALUATION SUMMARY",
                             baseline_aggregate=None, baseline_all_metrics=None, baseline_method=None,
@@ -126,13 +152,17 @@ def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_t
     metrics_table = [
         ('T60 Error', 't60_error', 's'), ('T60 Abs Error', 't60_abs_error', 's'), ('T60 Perc Error', 't60_perc_error', '%'),
         ('EDT Error', 'edt_error', 's'), ('DRR Error', 'drr_error', 'dB'),
-        ('DRR Abs Error', 'drr_abs_error', 'dB'), ('C50 Error', 'c50_error', 'dB'),
-        ('C80 Error', 'c80_error', 'dB'), ('LSD (broadband)', 'lsd', 'dB'),
+        ('DRR Abs Error', 'drr_abs_error', 'dB'),
+        ('C50 MAE', 'c50_abs_error', 'dB'), ('C50 Bias', 'c50_error', 'dB'),
+        ('C80 MAE', 'c80_abs_error', 'dB'), ('C80 Bias', 'c80_error', 'dB'),
+        ('LSD (broadband)', 'lsd', 'dB'),
         ('EDC Distance', 'edc_distance', 'dB²'), ('Cosine Similarity', 'cosine_similarity', ''),
     ]
     for name, key, unit in metrics_table:
         if key in aggregate:
             lines.append(format_metric_line(name, aggregate[key], unit))
+
+    lines.extend(_format_t60_per_band_section(aggregate, data_info))
 
     # Baseline section (if enabled)
     if baseline_aggregate is not None:
@@ -143,6 +173,8 @@ def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_t
         for name, key, unit in metrics_table:
             if key in baseline_aggregate:
                 lines.append(format_metric_line(name, baseline_aggregate[key], unit))
+
+        lines.extend(_format_t60_per_band_section(baseline_aggregate, data_info))
 
         # Comparison table
         if baseline_all_metrics is not None and diff_all_metrics is not None:
@@ -215,6 +247,11 @@ def save_detailed_metrics_table(all_metrics, all_samples, save_path):
     """
     lines = []
 
+    band_freqs = sorted(all_metrics[0]['t60'].get('per_band_perc', {}).keys()) if all_metrics else []
+
+    def fc_col_name(fc):
+        return f"T60_Perc_{int(fc)}Hz"
+
     # Header
     header = [
         "RIR_Index",
@@ -226,8 +263,8 @@ def save_detailed_metrics_table(all_metrics, all_samples, save_path):
         "EDT_Error", "EDT_Abs_Error",
         "DRR_Error", "DRR_Abs_Error",
         "C50_Error", "C80_Error",
-        "LSD", "EDC_Distance", "Cosine_Similarity"
-    ]
+        "LSD", "EDC_Distance", "Cosine_Similarity",
+    ] + [fc_col_name(fc) for fc in band_freqs]
     lines.append(",".join(header))
 
     # Data rows
@@ -235,6 +272,7 @@ def save_detailed_metrics_table(all_metrics, all_samples, save_path):
         cond = sample['condition']
 
         # Extract condition values (room_dim[3], mic_loc[3], speaker_loc[3], rt60[1])
+        per_band_perc = metrics['t60'].get('per_band_perc', {})
         row = [
             str(idx),
             f"{cond[0]:.3f}", f"{cond[1]:.3f}", f"{cond[2]:.3f}",  # Room dimensions
@@ -251,7 +289,10 @@ def save_detailed_metrics_table(all_metrics, all_samples, save_path):
             f"{metrics['c80']['error']:.4f}",
             f"{metrics['lsd']['broadband']:.4f}",
             f"{metrics['edc_distance']['broadband']:.4f}",
-            f"{metrics['cosine_similarity']:.4f}"
+            f"{metrics['cosine_similarity']:.4f}",
+        ] + [
+            f"{per_band_perc[fc]:.4f}" if fc in per_band_perc else "nan"
+            for fc in band_freqs
         ]
         lines.append(",".join(row))
 

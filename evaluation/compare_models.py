@@ -15,7 +15,10 @@ Usage:
         --model_2 May28_17-36-33_dsief08 \\
         --metric t60_perc \\
         --t60_fit_range -5 -25 \\
-        --use_ddim
+        --use_ddim \\
+            
+
+    python3 evaluation/compare_models.py   --model_1 Jun08_19-28-08_dsief06   --model_2 May28_17-36-33_dsief08 --use_ddim --font_scale 1.8 --model_names Gen-Vision Gen-Scalar --plot_max_sec 0.4
 """
 
 import argparse
@@ -40,7 +43,9 @@ from utils.inference_data_loading import (
 )
 from utils.dataset_utils import build_condition_tensor
 from utils.acoustic_metrics import evaluate_rir_pair, align_rir_lengths, compute_edc, DEFAULT_T60_FIT_RANGE
-from utils.misc import get_israel_time, resolve_model_dir
+from utils.misc import get_israel_time, get_full_path
+import soundfile as sf
+from utils.audio_processing import load_speech, convolve_with_rir
 
 
 # =============================================================================
@@ -430,6 +435,54 @@ def plot_edc_band_figure(
 
 
 # =============================================================================
+# Reverb speech
+# =============================================================================
+
+_DEFAULT_SPEECH = '/home/yuvalmad/Projects/Gen-RIR-Diffusion/data/1195-130164-0010.wav'
+
+def save_reverb_speech(
+    rows: List[Dict],
+    speech_paths: List[str],
+    sr: int,
+    out_dir: Path,
+    model_names: List[str],
+) -> None:
+    """Convolve each speech file with real/gen RIRs for the Med-I #1 and Med-II #1 rows.
+
+    Saves 4 WAVs per (row × speech): clean, real, model_names[0], model_names[1].
+    Output: out_dir/reverb_speech/{label}_{speech_stem}_{variant}.wav
+    """
+    reverb_dir = out_dir / 'reverb_speech'
+    reverb_dir.mkdir(exist_ok=True)
+
+    target_rows = [r for r in rows if r['label'] in ('Med-I #1', 'Med-II #1')]
+
+    for speech_path in speech_paths:
+        speech, _ = load_speech(speech_path, target_sr=sr)
+        if speech is None:
+            print(f"  Skipping {speech_path} (failed to load)")
+            continue
+        speech_stem = Path(speech_path).stem
+
+        for row in target_rows:
+            label_safe = row['label'].replace(' ', '_').replace('#', '').replace('-', '_')
+            prefix = f"{label_safe}_{speech_stem}"
+
+            sf.write(reverb_dir / f"{prefix}_clean.wav", speech, sr)
+
+            real_rev = convolve_with_rir(speech, row['ref'],   normalize_rir=False, normalize_output=True)
+            sf.write(reverb_dir / f"{prefix}_real.wav", real_rev, sr)
+
+            gen1_rev = convolve_with_rir(speech, row['gen_1'], normalize_rir=False, normalize_output=True)
+            sf.write(reverb_dir / f"{prefix}_{model_names[0]}.wav", gen1_rev, sr)
+
+            gen2_rev = convolve_with_rir(speech, row['gen_2'], normalize_rir=False, normalize_output=True)
+            sf.write(reverb_dir / f"{prefix}_{model_names[1]}.wav", gen2_rev, sr)
+
+    print(f"  Reverb speech saved to: {reverb_dir}")
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -462,6 +515,11 @@ def parse_args():
                         help="Waveform and EDC x-axis display limit in seconds (default: 0.5)")
     parser.add_argument("--font_scale", type=float, default=1.0,
                         help="Scale factor for all figure font sizes (default: 1.0)")
+    parser.add_argument("--speech_paths", nargs='*', default=[_DEFAULT_SPEECH],
+                        metavar='WAV',
+                        help="Clean speech WAVs to convolve with real/generated RIRs "
+                             "(Med-I #1 and Med-II #1 rows only). Pass --speech_paths with no "
+                             "arguments to skip. Default: project speech file.")
     return parser.parse_args()
 
 
@@ -474,8 +532,8 @@ def main():
     print(f"Device: {device}")
 
     # Resolve directories
-    model_1_dir = resolve_model_dir(args.model_1)
-    model_2_dir = resolve_model_dir(args.model_2)
+    model_1_dir = get_full_path(args.model_1, "outputs/finished")
+    model_2_dir = get_full_path(args.model_2, "outputs/finished")
     model_1_name = model_1_dir.name
     model_2_name = model_2_dir.name
 
@@ -620,6 +678,10 @@ def main():
         plot_max_ms=plot_max_ms,
         font_scale=args.font_scale,
     )
+
+    if args.speech_paths:
+        print("\nGenerating reverb speech samples...")
+        save_reverb_speech(rows, args.speech_paths, sr, out_dir, args.model_names)
 
     print(f"\nDone. Output: {out_dir}")
 

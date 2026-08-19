@@ -19,6 +19,7 @@ from typing import Dict, List, Tuple, Optional, Union
 import warnings
 
 DEFAULT_T60_FIT_RANGE: Tuple[float, float] = (-5, -25)
+DEFAULT_OCTAVE_BANDS: List[float] = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0]
 
 
 # =============================================================================
@@ -68,7 +69,7 @@ def compute_edc_octave_bands(rir: np.ndarray, sr: int,
         Dictionary mapping center frequency to EDC (in dB)
     """
     if center_freqs is None:
-        center_freqs = [125, 250, 500, 1000, 2000, 4000]
+        center_freqs = DEFAULT_OCTAVE_BANDS
     
     rir = np.asarray(rir).flatten()
     edcs = {}
@@ -105,7 +106,7 @@ def estimate_t60_from_edc(edc_db: np.ndarray, sr: int,
     """
     Estimate T60 from EDC using linear regression.
     
-    Uses T30 method: fit line from -5dB to -35dB, extrapolate to -60dB.
+    Fits a line over the `fit_range` dB window of the EDC and extrapolates to -60 dB.
     
     Args:
         edc_db: Energy decay curve in dB
@@ -223,14 +224,19 @@ def t60_error(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
     t60_ref_bands = compute_t60_octave_bands(rir_ref, sr, center_freqs, fit_range)
     
     band_errors = {}
+    band_perc_errors = {}
     for fc in t60_gen_bands:
         if fc in t60_ref_bands:
-            if not np.isnan(t60_gen_bands[fc]) and not np.isnan(t60_ref_bands[fc]):
-                band_errors[fc] = t60_gen_bands[fc] - t60_ref_bands[fc]
-    
+            gen_b = t60_gen_bands[fc]
+            ref_b = t60_ref_bands[fc]
+            if not np.isnan(gen_b) and not np.isnan(ref_b):
+                band_errors[fc] = gen_b - ref_b
+                if ref_b != 0:
+                    band_perc_errors[fc] = abs(gen_b - ref_b) / ref_b * 100
+
     valid_errors = [e for e in band_errors.values() if not np.isnan(e)]
     mean_error = np.mean(np.abs(valid_errors)) if valid_errors else np.nan
-    
+
     # Compute percentage error (guard only against division by zero)
     perc_error = abs(t60_gen - t60_ref) / t60_ref * 100 if t60_ref != 0 else np.nan
 
@@ -240,6 +246,7 @@ def t60_error(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
         'broadband_ref': t60_ref,
         'perc': perc_error,
         'per_band': band_errors,
+        'per_band_perc': band_perc_errors,
         'mean_band_abs_error': mean_error
     }
 
@@ -509,7 +516,7 @@ def compute_lsd_octave_bands(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int, 
         Dictionary mapping center frequency to LSD
     """
     if center_freqs is None:
-        center_freqs = [125, 250, 500, 1000, 2000, 4000]
+        center_freqs = DEFAULT_OCTAVE_BANDS
 
     rir_gen = np.asarray(rir_gen).flatten()
     rir_ref = np.asarray(rir_ref).flatten()
@@ -638,7 +645,7 @@ def edc_distance_octave_bands(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
                                metric: str = 'mse') -> Dict[float, float]:
     """Compute EDC distance per octave band."""
     if center_freqs is None:
-        center_freqs = [125, 250, 500, 1000, 2000, 4000]
+        center_freqs = DEFAULT_OCTAVE_BANDS
     
     rir_gen = np.asarray(rir_gen).flatten()
     rir_ref = np.asarray(rir_ref).flatten()
@@ -692,7 +699,7 @@ def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
         Dictionary containing requested metrics
     """
     if center_freqs is None:
-        center_freqs = [125, 250, 500, 1000, 2000, 4000]
+        center_freqs = DEFAULT_OCTAVE_BANDS
     if metrics is None:
         metrics = ALL_METRICS
 
@@ -787,6 +794,12 @@ def aggregate_metrics(results: List[Dict]) -> Dict:
         aggregate['t60_abs_error'] = safe_stats(t60_abs_errors)
         aggregate['t60_perc_error'] = safe_stats([r['t60']['perc'] for r in results])
         aggregate['t60_mean_band_abs_error'] = safe_stats([r['t60']['mean_band_abs_error'] for r in results])
+        all_bands = sorted({fc for r in results for fc in r['t60'].get('per_band_perc', {})})
+        aggregate['t60_band_perc_error'] = {
+            fc: safe_stats([r['t60']['per_band_perc'][fc]
+                            for r in results if fc in r['t60'].get('per_band_perc', {})])
+            for fc in all_bands
+        }
 
     if has('edt'):
         aggregate['edt_error'] = safe_stats([r['edt']['error'] for r in results])
@@ -797,9 +810,13 @@ def aggregate_metrics(results: List[Dict]) -> Dict:
                                                   if r['drr']['error'] is not None and not np.isnan(r['drr']['error'])])
 
     if has('c50'):
-        aggregate['c50_error'] = safe_stats([r['c50']['error'] for r in results])
+        c50_errors = [r['c50']['error'] for r in results]
+        aggregate['c50_error'] = safe_stats(c50_errors)
+        aggregate['c50_abs_error'] = safe_stats([abs(e) for e in c50_errors if e is not None and not np.isnan(e)])
     if has('c80'):
-        aggregate['c80_error'] = safe_stats([r['c80']['error'] for r in results])
+        c80_errors = [r['c80']['error'] for r in results]
+        aggregate['c80_error'] = safe_stats(c80_errors)
+        aggregate['c80_abs_error'] = safe_stats([abs(e) for e in c80_errors if e is not None and not np.isnan(e)])
 
     if has('lsd'):
         aggregate['lsd'] = safe_stats([r['lsd']['broadband'] for r in results])

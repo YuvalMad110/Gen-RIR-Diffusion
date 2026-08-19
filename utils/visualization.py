@@ -7,16 +7,20 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import List, Optional, Dict
 
-from utils.acoustic_metrics import compute_edc
+from utils.acoustic_metrics import compute_edc, compute_t60
 from utils.signal_edc import create_edc_plots_mode2
 
 
-def format_condition_string(condition: np.ndarray, mode: str = "room") -> str:
-    """Format condition parameters for display."""
+def format_condition_string(condition: np.ndarray, mode: str = "room", rt60: Optional[float] = None) -> str:
+    """Format condition parameters for display.
+
+    rt60: measured RT60 (seconds) to show in the 'room' string. When None, RT60 is omitted.
+          Callers that have the reference RIR should compute it with compute_t60 and pass it here.
+    """
     if mode == "room":
         room_dims = condition[:3]
-        rt60 = condition[-1]
-        return f"Room: {room_dims[0]:.1f}x{room_dims[1]:.1f}x{room_dims[2]:.1f}m, RT60: {rt60:.2f}s"
+        rt60_str = f", RT60: {rt60:.2f}s" if rt60 is not None else ""
+        return f"Room: {room_dims[0]:.1f}x{room_dims[1]:.1f}x{room_dims[2]:.1f}m{rt60_str}"
     elif mode == "locations":
         mic_loc = condition[3:6]
         speaker_loc = condition[6:9]
@@ -86,7 +90,7 @@ def plot_comparison(real_rirs_wave: List[np.ndarray], generated_rirs_wave: List[
 
 def plot_edc_comparison(real_rirs: List[np.ndarray], generated_rirs: List[np.ndarray],
                         conditions: np.ndarray, rir_indices: List[int], sr: int, save_path: str,
-                        metrics: Optional[Dict] = None, octave_bands: List[float] = None,
+                        use_rt60_condition: bool, metrics: Optional[Dict] = None, octave_bands: List[float] = None,
                         title: str = ""):
     """Create Energy Decay Curve comparison plot."""
     n_rirs = len(real_rirs)
@@ -110,11 +114,11 @@ def plot_edc_comparison(real_rirs: List[np.ndarray], generated_rirs: List[np.nda
         axes[i].plot(time_gen, 10 * np.log10(gen_edc + 1e-10), 
                      'b--', linewidth=1.5, label='Generated', alpha=0.8)
         
-        rt60 = conditions[i, -1]
+        rt60 = conditions[i, 9] if use_rt60_condition else compute_t60(real_rirs[i], sr)
         axes[i].axhline(y=-60, color='r', linestyle=':', alpha=0.5, label='RT60 threshold')
         axes[i].axvline(x=rt60, color='orange', linestyle=':', alpha=0.5, label=f'RT60={rt60:.2f}s')
-        
-        condition_str = format_condition_string(conditions[i], "room")
+
+        condition_str = format_condition_string(conditions[i], "room", rt60=rt60)
         axes[i].set_title(f'EDC Comparison #{idx} - {condition_str}')
         axes[i].set_ylabel('Energy (dB)')
         axes[i].set_ylim(-80, 5)
@@ -153,8 +157,10 @@ def _extract_metric_values(all_metrics):
         ([r['t60']['perc'] for r in all_metrics], 'T60 Percentage Error', '%', 'hist_t60_perc_error.png'),
         ([r['drr']['error'] for r in all_metrics], 'DRR Error', 'dB', 'hist_drr_error.png'),
         ([r['edt']['error'] for r in all_metrics], 'EDT Error', 's', 'hist_edt_error.png'),
-        ([r['c50']['error'] for r in all_metrics], 'C50 Error', 'dB', 'hist_c50_error.png'),
-        ([r['c80']['error'] for r in all_metrics], 'C80 Error', 'dB', 'hist_c80_error.png'),
+        ([abs(r['c50']['error']) for r in all_metrics if r['c50']['error'] is not None and not np.isnan(r['c50']['error'])], 'C50 MAE', 'dB', 'hist_c50_mae.png'),
+        ([r['c50']['error'] for r in all_metrics], 'C50 Bias', 'dB', 'hist_c50_bias.png'),
+        ([abs(r['c80']['error']) for r in all_metrics if r['c80']['error'] is not None and not np.isnan(r['c80']['error'])], 'C80 MAE', 'dB', 'hist_c80_mae.png'),
+        ([r['c80']['error'] for r in all_metrics], 'C80 Bias', 'dB', 'hist_c80_bias.png'),
         ([r['lsd']['broadband'] for r in all_metrics], 'Log-Spectral Distance', 'dB', 'hist_lsd.png'),
         ([r['edc_distance']['broadband'] for r in all_metrics], 'EDC Distance (MSE)', 'dB²', 'hist_edc_distance.png'),
         ([r['cosine_similarity'] for r in all_metrics], 'Cosine Similarity', '', 'hist_cosine_similarity.png'),
@@ -225,8 +231,8 @@ def plot_histograms_summary(all_metrics, n_samples, save_path, baseline_all_metr
         ('T60 Perc Error (%)', 'T60%', lambda m: m['t60']['perc']),
         ('DRR Error (dB)', 'DRR',     lambda m: m['drr']['error']),
         ('EDT Error (s)', 'EDT',       lambda m: m['edt']['error']),
-        ('C50 Error (dB)', 'C50',     lambda m: m['c50']['error']),
-        ('C80 Error (dB)', 'C80',     lambda m: m['c80']['error']),
+        ('C50 MAE (dB)', 'C50 MAE',   lambda m: abs(m['c50']['error']) if m['c50']['error'] is not None and not np.isnan(m['c50']['error']) else np.nan),
+        ('C80 MAE (dB)', 'C80 MAE',  lambda m: abs(m['c80']['error']) if m['c80']['error'] is not None and not np.isnan(m['c80']['error']) else np.nan),
         ('LSD (dB)', 'LSD',           lambda m: m['lsd']['broadband']),
         ('EDC Dist (dB²)', 'EDC',     lambda m: m['edc_distance']['broadband']),
         ('Cosine Similarity', 'Cos Sim', lambda m: m['cosine_similarity']),
@@ -264,7 +270,7 @@ def plot_histograms_summary(all_metrics, n_samples, save_path, baseline_all_metr
     print(f"Summary figure saved to {save_path}")
 
 
-def plot_selected_rir_samples(selected_samples, metric_name, sr, model_name, n_timesteps_inference, n_timesteps_train, save_dir):
+def plot_selected_rir_samples(selected_samples, metric_name, sr, model_name, n_timesteps_inference, n_timesteps_train, save_dir, use_rt60_condition: bool):
     """Plot all selected RIR pairs on a single image with separate waveforms, EDC, and metrics.
 
     If samples contain 'baseline' data, adds baseline traces to overlay/EDC and baseline metrics to text.
@@ -317,7 +323,7 @@ def plot_selected_rir_samples(selected_samples, metric_name, sr, model_name, n_t
 
             # Extract condition info
             room_dims = condition[:3]
-            rt60_real = condition[-1]
+            rt60_real = condition[9] if use_rt60_condition else compute_t60(rir_ref, sr)
             mic_loc = condition[3:6]
             speaker_loc = condition[6:9]
             speaker_mic_dist = np.linalg.norm(speaker_loc - mic_loc)
