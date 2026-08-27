@@ -190,16 +190,15 @@ def select_global_medians(results, top_scales, metric_key='t60', n=3, exclude_in
 # =============================================================================
 
 def regenerate_selected(model, test_dataset, sample_indices, top_scales, data_info, device,
-                        sample_size, num_inference_steps, use_ddim, src_trgt_dist_cond: bool = False):
+                        sample_size, num_inference_steps, use_ddim, collate_fn,
+                        src_trgt_dist_cond: bool = False):
     """Regenerate waveforms for selected samples at top scales.
 
     Returns:
         ref_waveforms: dict {idx: 1D numpy array}
         gen_waveforms: dict {(idx, scale): 1D numpy array}
     """
-    from torch.utils.data import default_collate
-
-    batch = default_collate([test_dataset[i] for i in sample_indices])
+    batch = collate_fn([test_dataset[i] for i in sample_indices])
     real_waveforms, conditions, k_factors = prepare_batch(batch, data_info, device, src_trgt_dist_cond)
 
     batch_dict = _normalize_batch_to_dict(batch)
@@ -604,7 +603,8 @@ def main():
     print("Regenerating waveforms for selected samples...")
     ref_waveforms, gen_waveforms = regenerate_selected(
         model, test_dataset, all_selected, top_scales, data_info, device,
-        sample_size, args.num_inference_steps, args.use_ddim, src_trgt_dist_cond)
+        sample_size, args.num_inference_steps, args.use_ddim, test_dataloader.collate_fn,
+        src_trgt_dist_cond)
 
     plot_sweep_samples(all_selected, labels, top_scales, ref_waveforms, gen_waveforms,
                        sr, save_path / 'sweep_samples.png')

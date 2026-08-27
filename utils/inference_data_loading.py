@@ -225,6 +225,11 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
             apply_zero_tail=False,
             dataset_type='soundspaces',
         )
+        if nSamples is not None:
+            test_size = int(nSamples * data_params['test_ratio'])
+            if test_size < len(test_dataset):
+                test_dataset = torch.utils.data.Subset(test_dataset, range(test_size))
+
         test_dataloader = torch.utils.data.DataLoader(
             test_dataset, batch_size=batch_size, shuffle=False,
             num_workers=workers, collate_fn=collate_fn, drop_last=False,

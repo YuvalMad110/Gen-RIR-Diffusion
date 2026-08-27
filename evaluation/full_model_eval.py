@@ -251,6 +251,8 @@ def main():
     print("\nLoading model...")
     model, run_config = load_pretrained_model(model_dir, device)
     data_info = data_params_from_run_config(run_config)
+    assert data_info.get('use_rt60_condition'), \
+        "use_rt60_condition must be True — save_detailed_metrics_table reads cond[9] (RT60). Fix the run_config or update the table."
     src_trgt_dist_cond = run_config['model_config']['src_trgt_dist_cond']
     args.num_inference_steps = args.num_inference_steps or model.n_timesteps
     args.model_path = str(model_dir / 'model_best.pth.tar')  # for summary reporting
