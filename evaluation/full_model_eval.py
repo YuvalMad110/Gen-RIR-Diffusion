@@ -36,14 +36,12 @@ from utils.dataset_utils import build_condition_tensor
 from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_t60_batch, DEFAULT_T60_FIT_RANGE, DEFAULT_OCTAVE_BANDS
 from utils.misc import get_israel_time, get_full_path
 from utils.evaluation import select_representative_samples
-from utils.evaluation_reporting import save_evaluation_summary, save_detailed_metrics_table, save_selected_samples
+from utils.evaluation_reporting import save_evaluation_summary, save_detailed_metrics_table, save_selected_samples, save_reverb_speech
 from utils.visualization import (
     plot_all_histograms, plot_histograms_summary,
     plot_selected_rir_samples, plot_edc_per_band_for_selected
 )
 from utils.synthetic_rir import generate_synthetic_rirs_batch
-import soundfile as sf
-from utils.audio_processing import convolve_with_rir
 
 
 # =============================================================================
@@ -204,40 +202,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def save_reverb_speech(selected_samples: dict, dry_signal: np.ndarray, sr: int, save_path: Path) -> None:
-    """Convolve dry_signal with median, best, and worst real/generated RIRs and save 7 WAV files.
-
-    Output: save_path/reverb_speech/{variant}.wav
-    Variants: clean, median_real, median_gen, best_real, best_gen, worst_real, worst_gen.
-    Uses the first sample from 't60_perc' median, best, and worst categories.
-    """
-    t60_samples = selected_samples.get('t60_perc', {})
-    median_entry = t60_samples.get('median', [{}])[0].get('sample')
-    best_entry   = t60_samples.get('best',   [{}])[0].get('sample')
-    worst_entry  = t60_samples.get('worst',  [{}])[0].get('sample')
-
-    if median_entry is None or best_entry is None:
-        print("  No selected samples available for reverb speech saving.")
-        return
-
-    reverb_dir = save_path / 'reverb_speech'
-    reverb_dir.mkdir(exist_ok=True)
-
-    sf.write(reverb_dir / 'clean.wav', dry_signal, sr)
-
-    entries = [('median', median_entry), ('best', best_entry)]
-    if worst_entry is not None:
-        entries.append(('worst', worst_entry))
-
-    for label, sample in entries:
-        real_rev = convolve_with_rir(dry_signal, sample['reference'], normalize_rir=False, normalize_output=True)
-        gen_rev  = convolve_with_rir(dry_signal, sample['generated'], normalize_rir=False, normalize_output=True)
-        sf.write(reverb_dir / f'{label}_real.wav', real_rev, sr)
-        sf.write(reverb_dir / f'{label}_gen.wav',  gen_rev,  sr)
-
-    print(f"  Reverb speech saved to: {reverb_dir}")
-
-
 def main():
     args = parse_args()
 
@@ -310,8 +274,9 @@ def main():
 
     # Select representative samples based on hardcoded metrics
     print("\nSelecting representative samples...")
-    metric_names = ['t60_perc']
-    selected_samples = select_representative_samples(all_samples, metric_names)
+    plot_metric_names  = ['t60_perc', 'c50', 'drr', 'lsd']
+    reverb_metric_name = 't60_perc'
+    selected_samples = select_representative_samples(all_samples, plot_metric_names)
 
     # ---------- Reporting and Visualization ----------
     # Print and save results
@@ -346,7 +311,7 @@ def main():
                                         args.octave_bands, save_path)
 
     print("\nGenerating reverb speech samples...")
-    save_reverb_speech(selected_samples, dry_signal, data_info['sr_target'], save_path)
+    save_reverb_speech(selected_samples, dry_signal, data_info['sr_target'], save_path, metric_name=reverb_metric_name)
 
     print(f"\n✓ Evaluation complete! Results saved to: {save_path}")
 

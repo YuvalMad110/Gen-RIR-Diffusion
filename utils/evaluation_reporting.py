@@ -6,10 +6,12 @@ Used by full_model_eval.py and synthetic_eval.py.
 """
 
 import numpy as np
+import soundfile as sf
 import torch
 from pathlib import Path
 
 from utils.misc import get_israel_time
+from utils.audio_processing import convolve_with_rir
 
 
 def format_metric_line(name, stats, unit):
@@ -330,3 +332,37 @@ def save_selected_samples(selected_samples, data_info, save_dir):
         save_path = save_dir / filename
         torch.save(save_data, save_path)
         print(f"Selected samples for {metric_name} saved to: {save_path}")
+
+
+def save_reverb_speech(selected_samples: dict, dry_signal: np.ndarray, sr: int,
+                       save_path: Path, metric_name: str = 't60_perc') -> None:
+    """Convolve dry_signal with median, best, and worst real/generated RIRs and save WAV files.
+
+    Output: save_path/reverb_speech/{variant}.wav
+    Variants: clean, median_real, median_gen, best_real, best_gen, worst_real, worst_gen.
+    """
+    metric_samples = selected_samples.get(metric_name, {})
+    median_entry = metric_samples.get('median', [{}])[0].get('sample')
+    best_entry   = metric_samples.get('best',   [{}])[0].get('sample')
+    worst_entry  = metric_samples.get('worst',  [{}])[0].get('sample')
+
+    if median_entry is None or best_entry is None:
+        print("  No selected samples available for reverb speech saving.")
+        return
+
+    reverb_dir = Path(save_path) / 'reverb_speech'
+    reverb_dir.mkdir(exist_ok=True)
+
+    sf.write(reverb_dir / 'clean.wav', dry_signal, sr)
+
+    entries = [('median', median_entry), ('best', best_entry)]
+    if worst_entry is not None:
+        entries.append(('worst', worst_entry))
+
+    for label, sample in entries:
+        real_rev = convolve_with_rir(dry_signal, sample['reference'], normalize_rir=False, normalize_output=True)
+        gen_rev  = convolve_with_rir(dry_signal, sample['generated'], normalize_rir=False, normalize_output=True)
+        sf.write(reverb_dir / f'{label}_real.wav', real_rev, sr)
+        sf.write(reverb_dir / f'{label}_gen.wav',  gen_rev,  sr)
+
+    print(f"  Reverb speech saved to: {reverb_dir}")

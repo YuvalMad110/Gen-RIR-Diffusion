@@ -173,6 +173,7 @@ def plot_main_figure(
     model_names: List[str] = None,
     plot_max_ms: float = 500.0,
     font_scale: float = 1.0,
+    use_rt60_condition: bool = True,
 ) -> None:
     """6 rows × 5 cols: Real | model_names[0] | model_names[1] | EDC overlay | Specs text box."""
     if model_names is None:
@@ -260,7 +261,7 @@ def plot_main_figure(
         # col 4 — Specs text box
         axes[r, 4].axis('off')
         room = cond[:3]
-        rt60 = cond[-1] if len(cond) >= 10 else float('nan')
+        rt60 = cond[9] if (use_rt60_condition and len(cond) >= 10) else float('nan')
         mic  = cond[3:6]
         spk  = cond[6:9]
         dist = float(np.linalg.norm(spk - mic))
@@ -669,6 +670,7 @@ def main():
         model_names=args.model_names,
         plot_max_ms=plot_max_ms,
         font_scale=args.font_scale,
+        use_rt60_condition=data_info['use_rt60_condition'],
     )
     plot_edc_band_figure(
         rows, args.octave_bands, sr,
