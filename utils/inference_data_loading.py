@@ -145,7 +145,7 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
 
     For GTU: collate_fn=None, yields 5-tuples (rir, room_dim, mic_loc, speaker_loc, rt60).
     For SoundSpaces: scale_and_spectrogram_collate_fn with scale_rir_flag=False,
-        yields dicts with keys 'rir', 'room_dim', 'mic_loc', 'speaker_loc', and optionally 'images'.
+        yields dicts with keys 'rir', 'room_dim', 'mic_loc', 'speaker_loc', 'scene', and optionally 'rt60', 'images'.
 
     Args:
         data_params:  Dict as returned by data_params_from_run_config or legacy data_info.

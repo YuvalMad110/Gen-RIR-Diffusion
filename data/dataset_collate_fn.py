@@ -22,6 +22,7 @@ def scale_and_spectrogram_collate_fn(sr: float,
         'room_dim'    — [B, 3]
         'mic_loc'     — [B, 3]
         'speaker_loc' — [B, 3]
+        'scene'       — list[str]         (SoundSpaces only) scene name per sample
         'rt60'        — [B]              (GTU always; SoundSpaces when use_rt60=True)
         'images'      — [B, N, 3, H, W]  (SoundSpaces only, when images are present)
                         N = number of images per RIR sample. Currently N=1
@@ -70,13 +71,19 @@ def scale_and_spectrogram_collate_fn(sr: float,
         }
 
     def soundspaces_collate(batch: List[Tuple]) -> dict:
-        if len(batch[0]) == 6:
-            rirs, room_dims, mic_locs, speaker_locs, images, rt60s = zip(*batch)
-        else:
-            rirs, room_dims, mic_locs, speaker_locs, images = zip(*batch)
+        # Tuple layout: (rir, room_dim, mic_loc, speaker_loc, images, scene, *rt60(*optional))
+        if len(batch[0]) == 7:
+            rirs, room_dims, mic_locs, speaker_locs, images, scenes, rt60s = zip(*batch)
+        elif len(batch[0]) == 6:
+            rirs, room_dims, mic_locs, speaker_locs, images, scenes = zip(*batch)
             rt60s = None
+        else:
+            raise ValueError(
+                f"soundspaces_collate: expected 6 or 7 fields, got {len(batch[0])}."
+            )
         d = {
-            'rir': _process_rirs(rirs),
+            'rir':   _process_rirs(rirs),
+            'scene': list(scenes),
             **_stack_locs(room_dims, mic_locs, speaker_locs),
         }
         if rt60s is not None:

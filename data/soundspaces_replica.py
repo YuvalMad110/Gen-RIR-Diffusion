@@ -98,11 +98,11 @@ class SoundSpacesReplicaDataset(Dataset):
     """
     Dataset of (RIR, conditioning) pairs from SoundSpaces/Replica.
 
-    Each sample returns a 5-tuple:
-        (rir, room_dim, mic_loc, speaker_loc, images)
+    Each sample returns a 6-tuple:
+        (rir, room_dim, mic_loc, speaker_loc, images, scene)
 
-    or a 6-tuple when use_rt60=True:
-        (rir, room_dim, mic_loc, speaker_loc, images, rt60)
+    or a 7-tuple when use_rt60=True:
+        (rir, room_dim, mic_loc, speaker_loc, images, scene, rt60)
 
     where:
         rir         — torch.Tensor [1, T]              mono RIR at 44.1 kHz
@@ -110,7 +110,8 @@ class SoundSpacesReplicaDataset(Dataset):
         mic_loc     — np.array     [u, v, z_norm]       receiver in room-aligned coords
         speaker_loc — np.array     [u, v, z_norm]       source in room-aligned coords
         images      — torch.Tensor [N_img, 3, H, W]    stacked images, or None
-        rt60        — float                             RT60 in seconds (6-tuple only)
+        scene       — str                               scene name (e.g. 'office_2')
+        rt60        — float                             RT60 in seconds (7-tuple only)
 
     N_img = (1 if rir_view_type is not None else 0) + corners_per_scene.
     All images are [3, H, W] float32 — RGB is ImageNet-normalised, depth is
@@ -218,7 +219,7 @@ class SoundSpacesReplicaDataset(Dataset):
         # ---- Images ----
         images = self._load_images(row)
 
-        out = (rir, room_dim, mic_loc, speaker_loc, images)
+        out = (rir, room_dim, mic_loc, speaker_loc, images, row['scene'])
         if self.use_rt60:
             out += (float(row['rt60']),)
         return out
