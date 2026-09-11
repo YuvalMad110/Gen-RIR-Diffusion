@@ -439,7 +439,7 @@ def plot_edc_band_figure(
 # Reverb speech
 # =============================================================================
 
-_DEFAULT_SPEECH = '/home/yuvalmad/Projects/Gen-RIR-Diffusion/data/1195-130164-0010.wav'
+_DEFAULT_SPEECH = '/dsi/gannot-lab/gannot-lab1/datasets/LibriSpeech/LibriSpeech/test-clean/4992/41797/4992-41797-0013.flac'
 
 def save_reverb_speech(
     rows: List[Dict],

@@ -193,7 +193,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu)")
     parser.add_argument("--workers", type=int, default=8, help="DataLoader workers")
     parser.add_argument("--debug_mode", type=bool, default=False, help="Debug mode: fast run")
-    parser.add_argument("--speech_path", type=str, default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/data/1195-130164-0010.wav',
+    parser.add_argument("--speech_path", type=str, default='/dsi/gannot-lab/gannot-lab1/datasets/LibriSpeech/LibriSpeech/test-clean/4992/41797/4992-41797-0013.flac',
                         help="Path to clean speech for reverbed LSD computation")
     parser.add_argument("--baseline_method", type=str, default='none', choices=['habets', 'pra', 'none'],
                         help="Synthetic RIR baseline method (habets is preferred over pra)")

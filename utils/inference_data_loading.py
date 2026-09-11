@@ -1,11 +1,10 @@
 """
 Data loading utilities for RIR inference.
 
-Functions list:
-- load_pretrained_model: Load model from a modern run directory (has run_config.json).
-- data_params_from_run_config: Extract a data_info-compatible dict from run_config['args'].
-- load_model_and_data_info: Legacy loader for old GTU checkpoints (no run_config.json).
-- build_test_dataloader: Reconstruct the test-split DataLoader from run_config or data_info.
+Functions:
+- load_pretrained_model: Load model from a run directory (has run_config.json).
+- data_params_from_run_config: Extract a data_params dict from run_config['args'].
+- build_test_dataloader: Build the test-split DataLoader from run_config.
 """
 
 import os
@@ -98,10 +97,10 @@ def data_params_from_run_config(run_config: Dict) -> Dict:
         'train_ratio':         a.get('train_ratio', 0.7),
         'eval_ratio':          a.get('eval_ratio', 0.15),
         'test_ratio':          a.get('test_ratio', 0.15),
-        'split_by_room':       a.get('split_by_room', False),
+        'split_by_room':       a.get('split_by_room', True),
         'random_seed':         a.get('random_seed', 42),
-        'dataset_name':        a.get('dataset_name', 'gtu'),
-        'use_rt60_condition':  a.get('use_rt60_condition', False),
+        'dataset_name':        a['dataset_name'],
+        'use_rt60_condition':  a['use_rt60_condition'],
     }
 
 
@@ -140,17 +139,16 @@ def load_model_and_data_info(model_path: str, device: torch.device, model_class)
 
 def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
                           run_config: Optional[Dict] = None):
-    """Build a test-split DataLoader from data_params (and optionally run_config for SoundSpaces).
+    """Build a test-split DataLoader from data_params and run_config.
 
-    For GTU: collate_fn=None, yields 5-tuples (rir, room_dim, mic_loc, speaker_loc, rt60).
-    For SoundSpaces: scale_and_spectrogram_collate_fn with scale_rir_flag=False,
-        yields dicts with keys 'rir', 'room_dim', 'mic_loc', 'speaker_loc', 'scene', and optionally 'rt60', 'images'.
+    Yields dicts with keys 'rir', 'room_dim', 'mic_loc', 'speaker_loc', 'scene',
+    and optionally 'rt60', 'images'.
 
     Args:
-        data_params:  Dict as returned by data_params_from_run_config or legacy data_info.
+        data_params:  Dict as returned by data_params_from_run_config.
         batch_size:   Batch size for the DataLoader.
         workers:      Number of DataLoader workers.
-        run_config:   Full run_config dict (needed for SoundSpaces dataset params).
+        run_config:   Full run_config dict.
 
     Returns:
         (test_dataset, test_dataloader)
@@ -158,35 +156,13 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
     import torch.utils.data
     from data.rir_dataset import load_rir_dataset
 
-    dataset_name = data_params.get('dataset_name', 'gtu')
+    if run_config is None:
+        raise ValueError("run_config is required for build_test_dataloader")
+
+    dataset_name = data_params.get('dataset_name', 'soundspaces')
     nSamples = data_params.get('nSamples')
 
-    if dataset_name == 'gtu':
-        args = run_config['args'] if run_config else {}
-        _, _, test_dataset = load_rir_dataset(
-            name='gtu',
-            path=args.get('data_path', './datasets/GTU_rir/GTU_RIR.pickle.dat'),
-            split=True, mode='raw',
-            hop_length=data_params['hop_length'], n_fft=data_params['n_fft'],
-            use_spectrogram=True,
-            sample_max_sec=data_params['sample_max_sec'],
-            nSamples=nSamples,
-            sr_target=data_params['sr_target'],
-            train_ratio=data_params['train_ratio'],
-            eval_ratio=data_params['eval_ratio'],
-            test_ratio=data_params['test_ratio'],
-            random_seed=data_params['random_seed'],
-            split_by_room=data_params['split_by_room'],
-        )
-        test_dataloader = torch.utils.data.DataLoader(
-            test_dataset, batch_size=batch_size, shuffle=False,
-            num_workers=workers, collate_fn=None, drop_last=False,
-            pin_memory=torch.cuda.is_available(),
-        )
-
-    else:  # soundspaces
-        if run_config is None:
-            raise ValueError("run_config is required for SoundSpaces test dataloader")
+    if dataset_name == 'soundspaces':
         a = run_config['args']
         ie_config = run_config.get('image_encoder_config')
 
@@ -200,6 +176,7 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
             image_root=a.get('image_root'),
             scenes=a.get('scenes'),
             split=True,
+            split_by_room=data_params['split_by_room'],
             train_ratio=data_params['train_ratio'],
             eval_ratio=data_params['eval_ratio'],
             test_ratio=data_params['test_ratio'],
@@ -224,16 +201,19 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
             apply_zero_tail=False,
             dataset_type='soundspaces',
         )
-        if nSamples is not None:
-            test_size = int(nSamples * data_params['test_ratio'])
-            if test_size < len(test_dataset):
-                test_dataset = torch.utils.data.Subset(test_dataset, range(test_size))
+    else:
+        raise ValueError(f"Unknown dataset_name: {dataset_name!r}. Expected 'soundspaces'.")
 
-        test_dataloader = torch.utils.data.DataLoader(
-            test_dataset, batch_size=batch_size, shuffle=False,
-            num_workers=workers, collate_fn=collate_fn, drop_last=False,
-            pin_memory=torch.cuda.is_available(),
-        )
+    if nSamples is not None:
+        test_size = int(nSamples * data_params['test_ratio'])
+        if test_size < len(test_dataset):
+            test_dataset = torch.utils.data.Subset(test_dataset, range(test_size))
+
+    test_dataloader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=workers, collate_fn=collate_fn, drop_last=False,
+        pin_memory=torch.cuda.is_available(),
+    )
 
     return test_dataset, test_dataloader
 

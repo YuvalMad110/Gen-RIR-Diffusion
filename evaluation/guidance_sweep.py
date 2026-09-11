@@ -477,7 +477,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--debug_mode", type=bool, default=False)
-    parser.add_argument("--speech_path", type=str, default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/data/1195-130164-0010.wav')
+    parser.add_argument("--speech_path", type=str, default='/dsi/gannot-lab/gannot-lab1/datasets/LibriSpeech/LibriSpeech/test-clean/4992/41797/4992-41797-0013.flac')
     # Sweep-specific
     parser.add_argument("--guidance_min", type=float, default=1.0)
     parser.add_argument("--guidance_max", type=float, default=8.0)

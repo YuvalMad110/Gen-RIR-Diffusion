@@ -5,7 +5,6 @@ from accelerate import Accelerator
 import torch
 from torch.utils.data import DataLoader
 import sys
-import platform
 # Make sure the project root is in sys.path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if project_root not in sys.path:
@@ -24,16 +23,11 @@ _DEFAULT_CFG     = 'model_config_VisualCond_HighRes_PosEnc512.json'
 _DEFAULT_SS_ROOT = '/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica/'
 
 """
-# GTU (original):
-CUDA_VISIBLE_DEVICES=3 python3 ./Projects/Gen-RIR-Diffusion/run_train.py --batch-size 16 --epochs 100 --nSamples 128 \
-|& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
-
 # SoundSpaces — scalar conditioning only (no images):
 CUDA_VISIBLE_DEVICES=1 python3 ./Projects/Gen-RIR-Diffusion/run_train.py \
     --batch-size 58 \
     --model-config model_config_VisualCond_HighRes_NoDist.json \
     |& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
-
 """
 
 # ------------------------- Utils --------------------------
@@ -44,10 +38,10 @@ def parse_args():
                         help='Path to model config JSON. Use model_config_VisualCond.json for image conditioning.')
 
     # Dataset selection
-    parser.add_argument('--dataset-name', type=str, default='soundspaces', choices=['gtu', 'soundspaces'],
-                        help='Dataset to train on. Defaults: gtu→GTU pickle, soundspaces→server RIR root')
+    parser.add_argument('--dataset-name', type=str, default='soundspaces', choices=['soundspaces'],
+                        help='Dataset to train on')
     parser.add_argument('--data-path', type=str, default=None,
-                        help='Dataset path. Defaults to GTU pickle or SoundSpaces RIR root based on --dataset-name')
+                        help='SoundSpaces RIR root directory (default: server path)')
     parser.add_argument('--image-root', type=str, default='/dsi/gannot-lab/gannot-lab1/datasets/Replica_rendered/',
                         help='Replica_rendered/ root; omit to disable image conditioning')
     parser.add_argument('--rir-view-type', type=str, default='rgb', choices=['rgb', 'depth', 'none'],
@@ -86,7 +80,7 @@ def parse_args():
     parser.add_argument('--train-ratio', type=float, default=0.7)
     parser.add_argument('--eval-ratio', type=float, default=0.15)
     parser.add_argument('--test-ratio', type=float, default=0.15)
-    parser.add_argument('--split-by-room', type=str2bool, default=False, help='Split by room ID to avoid data leakage (GTU only)')
+    parser.add_argument('--split-by-room', type=str2bool, default=True, help='Split at scene level to avoid data leakage (default True)')
     parser.add_argument('--random-seed', type=int, default=42)
 
     # Post-training evaluation
@@ -94,7 +88,7 @@ def parse_args():
 
     args = parser.parse_args()
     if args.data_path is None:
-        args.data_path = get_datasets_folder() if args.dataset_name == 'gtu' else _DEFAULT_SS_ROOT
+        args.data_path = _DEFAULT_SS_ROOT
     return args
 
 def load_model_config(config_path, dataset_name, use_rt60_condition=False):
@@ -110,12 +104,9 @@ def load_model_config(config_path, dataset_name, use_rt60_condition=False):
         model_config = json.load(f)
     # Strip comment keys (any key starting with "_" is treated as a comment)
     model_config = {k: v for k, v in model_config.items() if not k.startswith('_')}
-    # input_cond_dim: base is 9 (SoundSpaces) or 10 (GTU); each active flag adds 1
+    # input_cond_dim: base 9-dim + 1 for RT60 if enabled; +1 if src_trgt_dist_cond
     src_trgt_dist_cond = model_config.pop('src_trgt_dist_cond')
-    if dataset_name == 'soundspaces':
-        base_dim = 10 if use_rt60_condition else 9
-    else:
-        base_dim = 10
+    base_dim = 10 if use_rt60_condition else 9
     model_config['input_cond_dim'] = base_dim + (1 if src_trgt_dist_cond else 0)
     ie_config = model_config.pop('image_encoder_config', None)
     if ie_config and 'image_size' in ie_config:
@@ -147,19 +138,11 @@ def num_workers_test(dataset, nWorkers=[0,1,4,8,10, 12, 14, 16,18], batch_size=1
         elapsed_time = time.time() - start_time
         print(f"Number of workers: {nWorker}, Time taken: {elapsed_time:.2f} seconds")
 
-def get_datasets_folder():
-    """
-    Returns the path to the dataset folder based on the platform (local PC or server).
-    """
-    if platform.system() == "Windows": # my local PC
-        return os.path.normpath('C:/Yuval/MSc/AV_RIR/code_exp/rir_encoder/data/GTU_RIR_1024samples.pickle.dat')
-    else: # on the server
-         return os.path.normpath('./datasets/GTU_rir/GTU_RIR.pickle.dat')
 
 
 def make_train_dataloader(dataset, args, collate_fn):
     """Build the training DataLoader, using EpochSubsetSampler when nSamples is set."""
-    if args.dataset_name == 'soundspaces' and args.nSamples and args.nSamples < len(dataset):
+    if args.nSamples and args.nSamples < len(dataset):
         sampler = EpochSubsetSampler(len(dataset), args.nSamples)
         return DataLoader(dataset, batch_size=args.batch_size, sampler=sampler,
                           num_workers=args.workers, collate_fn=collate_fn,
@@ -219,27 +202,19 @@ def main():
 
     # ---------- Load datasets ----------
     print("\n----------- Loading datasets... -----------\n")
-    if args.dataset_name == 'gtu':
-        train_dataset, eval_dataset, test_dataset = load_rir_dataset(
-            name='gtu', path=args.data_path, split=True, mode='raw',
-            hop_length=args.hop_length, n_fft=args.n_fft, use_spectrogram=True,
-            sample_max_sec=args.sample_max_sec, nSamples=args.nSamples, sr_target=args.sr_target,
-            train_ratio=args.train_ratio, eval_ratio=args.eval_ratio, test_ratio=args.test_ratio,
-            random_seed=args.random_seed, split_by_room=args.split_by_room,
-        )
-    else:  # soundspaces
-        rir_view_type      = None if args.rir_view_type      == 'none' else args.rir_view_type
-        room_overview_type = None if args.room_overview_type == 'none' else args.room_overview_type
-        image_size = ie_config.get('image_size') if ie_config else None
-        train_dataset, eval_dataset, test_dataset = load_rir_dataset(
-            name='soundspaces', rir_root=args.data_path, image_root=args.image_root,
-            rir_view_type=rir_view_type, image_size=image_size,
-            room_overview_type=room_overview_type,
-            room_overview_config=args.room_overview_config,
-            sample_max_sec=args.sample_max_sec, sr_target=args.sr_target,
-            scenes=args.scenes, train_ratio=args.train_ratio, eval_ratio=args.eval_ratio,
-            test_ratio=args.test_ratio, random_seed=args.random_seed, use_rt60=args.use_rt60_condition,
-        )
+    rir_view_type      = None if args.rir_view_type      == 'none' else args.rir_view_type
+    room_overview_type = None if args.room_overview_type == 'none' else args.room_overview_type
+    image_size = ie_config.get('image_size') if ie_config else None
+    train_dataset, eval_dataset, test_dataset = load_rir_dataset(
+        name='soundspaces', rir_root=args.data_path, image_root=args.image_root,
+        rir_view_type=rir_view_type, image_size=image_size,
+        room_overview_type=room_overview_type,
+        room_overview_config=args.room_overview_config,
+        sample_max_sec=args.sample_max_sec, sr_target=args.sr_target,
+        scenes=args.scenes, split_by_room=args.split_by_room,
+        train_ratio=args.train_ratio, eval_ratio=args.eval_ratio,
+        test_ratio=args.test_ratio, random_seed=args.random_seed, use_rt60=args.use_rt60_condition,
+    )
 
     print(f"Dataset splits: {len(train_dataset)} - {len(eval_dataset)} - {len(test_dataset)}")
 
@@ -261,9 +236,8 @@ def main():
 
 
     # ---------- Model ----------
-    # Build ImageEncoder when image_root is provided for SoundSpaces
     image_encoder = None
-    if args.dataset_name == 'soundspaces' and args.image_root is not None:
+    if args.image_root is not None:
         assert ie_config is not None, "image_encoder_config missing from model config JSON"
         cross_attention_dim = model_config['encoder_hidden_dims'][-1]
         image_encoder = ImageEncoder(out_dim=cross_attention_dim, **ie_config)
@@ -322,7 +296,7 @@ def main():
         import shutil
         shutil.copy(args.model_config, os.path.join(configs_dir, 'model_config_original.json'))
 
-        if args.dataset_name == 'soundspaces' and args.room_overview_config is not None:
+        if args.room_overview_config is not None:
             shutil.copy(args.room_overview_config, os.path.join(configs_dir, 'room_overview_config.json'))
 
         print('\n---------- Training finished successfully!! ----------\n')
