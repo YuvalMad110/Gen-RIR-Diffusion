@@ -36,8 +36,8 @@ from pathlib import Path
 
 DEFAULT_REPLICA_ROOT = "/dsi/gannot-lab/gannot-lab1/datasets/Replica"
 PROJECT_ROOT         = Path(__file__).resolve().parents[2]
-OUTPUT_CSV           = PROJECT_ROOT / "data" / "room_geometry.csv"
-OUTPUT_VIZ_DIR       = PROJECT_ROOT / "data" / "replica_room_geometry"
+OUTPUT_CSV           = PROJECT_ROOT / "data" / "replica" / "room_geometry.csv"
+OUTPUT_VIZ_DIR       = PROJECT_ROOT / "data" / "replica" / "room_geometry_vis"
 
 ALL_SCENES = [
     "apartment_0", "apartment_1", "apartment_2",

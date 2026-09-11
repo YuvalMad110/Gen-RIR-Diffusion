@@ -38,7 +38,7 @@ ANGLES = [0, 90, 180, 270]
 
 DEFAULT_METADATA_ROOT = "/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/metadata/replica"
 DEFAULT_RIR_ROOT = "/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica"
-DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "replica"
 
 CSV_COLUMNS = [
     "scene",
@@ -307,7 +307,7 @@ def main():
     print(f"  right (1): {channel_counts[1]:>7,}  ({100*channel_counts[1]/total_valid:.1f}%)")
 
     # Write per-scene stats file
-    stats_file = args.output_dir / "data_analysis" / "soundspaces_scene_stats.txt"
+    stats_file = args.output_dir / "analysis" / "soundspaces_scene_stats.txt"
     stats_file.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "SoundSpaces/Replica — RIR pairs per scene",

@@ -65,7 +65,7 @@ except ImportError:
 DEFAULT_REPLICA_ROOT   = "/dsi/gannot-lab/gannot-lab1/datasets/Replica"
 DEFAULT_METADATA_ROOT  = "/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/metadata/replica"
 DEFAULT_OUTPUT_ROOT    = "/dsi/gannot-lab/gannot-lab1/datasets/Replica_rendered"
-DEFAULT_MAPPING_CSV    = Path(__file__).resolve().parents[1] / "soundspaces_replica_mapping.csv"
+DEFAULT_MAPPING_CSV    = Path(__file__).resolve().parents[1] / "replica" / "soundspaces_replica_mapping.csv"
 
 SUPPORTED_VIEWS = ["target2source", "room_panorama"]
 SUPPORTED_TYPES = ["depth", "rgb"]

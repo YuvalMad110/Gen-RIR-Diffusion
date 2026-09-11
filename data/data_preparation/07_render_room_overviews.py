@@ -36,9 +36,9 @@ from pathlib import Path
 DEFAULT_REPLICA_ROOT = "/dsi/gannot-lab/gannot-lab1/datasets/Replica"
 DEFAULT_OUTPUT_ROOT  = "/dsi/gannot-lab/gannot-lab1/datasets/Replica_rendered"
 TEST_OUTPUT_ROOT     = str(Path.home() / "temp" / "Replica_rendered")
-DEFAULT_GEOMETRY_CSV = Path(__file__).resolve().parents[1] / "room_geometry.csv"
+DEFAULT_GEOMETRY_CSV = Path(__file__).resolve().parents[1] / "replica" / "room_geometry.csv"
 DEFAULT_BINARY       = Path.home() / "tools" / "Replica-Dataset" / "build" / "ReplicaSDK" / "ReplicaPoseRenderer"
-DEFAULT_POSES_DIR    = Path(__file__).resolve().parents[1] / "poses"
+DEFAULT_POSES_DIR    = Path(__file__).resolve().parents[1] / "replica" / "poses"
 EGL_ENV_VAR          = "__EGL_VENDOR_LIBRARY_FILENAMES"
 EGL_VENDOR_FILE      = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
 

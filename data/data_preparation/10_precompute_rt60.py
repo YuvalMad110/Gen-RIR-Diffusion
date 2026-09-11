@@ -39,9 +39,9 @@ if project_root not in sys.path:
 
 from utils.acoustic_metrics import compute_t60
 
-_DEFAULT_MAPPING_CSV = os.path.join(project_root, 'data', 'soundspaces_replica_mapping.csv')
+_DEFAULT_MAPPING_CSV = os.path.join(project_root, 'data', 'replica', 'soundspaces_replica_mapping.csv')
 _DEFAULT_RIR_ROOT    = '/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica'
-_STATS_FILE          = Path(project_root) / 'data' / 'data_analysis' / 'soundspaces_scene_stats.txt'
+_STATS_FILE          = Path(project_root) / 'data' / 'replica' / 'analysis' / 'soundspaces_scene_stats.txt'
 
 
 def parse_args():

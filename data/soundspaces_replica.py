@@ -14,8 +14,8 @@ from torchvision import transforms
 from utils.dataset_utils import create_data_splits
 
 # Default dataset paths
-_DEFAULT_MAPPING_CSV  = os.path.join(os.path.dirname(__file__), "soundspaces_replica_mapping.csv")
-_DEFAULT_GEOMETRY_CSV = os.path.join(os.path.dirname(__file__), "room_geometry.csv")
+_DEFAULT_MAPPING_CSV  = os.path.join(os.path.dirname(__file__), "replica", "soundspaces_replica_mapping.csv")
+_DEFAULT_GEOMETRY_CSV = os.path.join(os.path.dirname(__file__), "replica", "room_geometry.csv")
 _DEFAULT_RIR_ROOT     = "/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica"
 _DEFAULT_IMAGE_ROOT   = "/dsi/gannot-lab/gannot-lab1/datasets/Replica_rendered"
 
@@ -275,7 +275,7 @@ def create_soundspaces_datasets(mapping_csv=_DEFAULT_MAPPING_CSV,
                                 room_overview_type=None,
                                 room_overview_config=None,
                                 scenes=None,
-                                nSamples=None,
+                                split_by_room=True,
                                 split=True,
                                 train_ratio=0.7, eval_ratio=0.15, test_ratio=0.15,
                                 random_seed=42,
@@ -320,7 +320,7 @@ def create_soundspaces_datasets(mapping_csv=_DEFAULT_MAPPING_CSV,
 
     if split:
         train_idx, eval_idx, test_idx = create_data_splits(
-            indices, group_keys=group_keys, split_by_group=True,
+            indices, group_keys=group_keys, split_by_group=split_by_room,
             train_ratio=train_ratio, eval_ratio=eval_ratio,
             test_ratio=test_ratio, seed=random_seed,
         )
