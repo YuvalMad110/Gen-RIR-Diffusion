@@ -36,16 +36,15 @@ factor=2 halves each spatial dimension (~4× fewer tokens).  Default: None
 (full spatial resolution is kept).
 
 Use this when VRAM is constrained. For reference, at batch=4, float16:
-  factor=None → ~430 MB KV cache for 1036 patches
-  factor=2    → ~108 MB  (259 patches)
-  factor=4    → ~27 MB   (63 patches)
+  factor=None → ~139 MB KV cache for 336 patches
+  factor=2    → ~33 MB   (80 patches)
+  factor=4    → ~8 MB    (20 patches)
 
 Image resolution
 ----------------
-`image_size=(H, W)` controls the resize applied before the backbone.
-The default (392, 518) keeps the 4:3 aspect ratio of the rendered 1280×960
-images and makes both dimensions divisible by the ViT patch size 14,
-giving a 28×37 = 1036-patch spatial grid.
+`image_size=(H, W)` is required and sets the resolution fed to the backbone;
+images at a different resolution are resampled to it. Both dimensions must be
+divisible by the ViT patch size 14. (224, 294) gives a 16×21 = 336-patch grid.
 """
 
 import math
@@ -72,10 +71,6 @@ _MODEL_IDS = {
     'large': 'depth-anything/Depth-Anything-V2-Large-hf',
     'base':  'depth-anything/Depth-Anything-V2-Base-hf',
 }
-
-# Default image size: (H, W) divisible by patch size 14 with ~4:3 aspect ratio.
-# Results in a 28×37 = 1036-patch spatial grid.
-_DEFAULT_IMAGE_SIZE = (392, 518)
 
 
 class ImageEncoder(nn.Module):
@@ -113,9 +108,12 @@ class ImageEncoder(nn.Module):
         pyramid_layers: Optional[List[int]] = None,
         layer_combination: Literal['fuse', 'stack'] = 'fuse',
         spatial_pool_factor: Optional[int] = None,
-        image_size: tuple = _DEFAULT_IMAGE_SIZE,
+        image_size: tuple = None,
     ):
         super().__init__()
+
+        if image_size is None:
+            raise ValueError("image_size missing from the model config")
 
         self.out_dim             = out_dim
         self.feature_mode        = feature_mode

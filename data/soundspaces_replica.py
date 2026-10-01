@@ -19,11 +19,6 @@ _DEFAULT_GEOMETRY_CSV = os.path.join(os.path.dirname(__file__), "replica", "room
 _DEFAULT_RIR_ROOT     = "/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica"
 _DEFAULT_IMAGE_ROOT   = "/dsi/gannot-lab/gannot-lab1/datasets/Replica_rendered"
 
-# (H, W) that preserves the 4:3 aspect ratio of the rendered 1280×960 images
-# while keeping both dimensions divisible by 14 (DA3 ViT-L patch size).
-# 392 = 28×14, 518 = 37×14  →  518/392 ≈ 1.32 ≈ 4/3.
-_DEFAULT_IMAGE_SIZE = (392, 518)
-
 # ImageNet mean/std — required by DA3 ViT-L (inherited from DINOv2 pretraining).
 _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD  = [0.229, 0.224, 0.225]
@@ -135,7 +130,7 @@ class SoundSpacesReplicaDataset(Dataset):
         split_name:           'train', 'eval', or 'test' — set by factory, not by user
         sample_max_sec:       maximum RIR length in seconds (default 2)
         sr_target:            resample RIRs to this rate; None keeps original 44.1 kHz
-        image_size:           (H, W) to resize images to (default (392, 518))
+        image_size:           (H, W) to resize images to; required when loading images
         use_rt60:             if True, read the precomputed 'rt60' column from mapping_csv
                               and return it as the 6th element of the sample tuple.
                               Requires 10_precompute_rt60.py to have been run first.
@@ -153,7 +148,7 @@ class SoundSpacesReplicaDataset(Dataset):
                  split_name:           str        = None,
                  sample_max_sec:       float      = _MAX_SEC,
                  sr_target:            int        = None,
-                 image_size:           tuple      = _DEFAULT_IMAGE_SIZE,
+                 image_size:           tuple      = None,
                  use_rt60:             bool       = False):
 
         self.rir_root             = rir_root
@@ -164,9 +159,13 @@ class SoundSpacesReplicaDataset(Dataset):
         self.sr_orig              = _SR
         self.sr_target            = sr_target if sr_target else _SR
         self.split_name           = split_name
-        self._image_size          = image_size
-        self.image_transform      = _make_image_transform(image_size)
         self.use_rt60             = use_rt60
+
+        self._loads_images = image_root is not None and (rir_view_type or room_overview_type)
+        if self._loads_images and image_size is None:
+            raise ValueError("image_size missing from the model config")
+        self._image_size     = image_size
+        self.image_transform = _make_image_transform(image_size) if self._loads_images else None
 
         self._scene_overview_map = {}
         if room_overview_config is not None:
