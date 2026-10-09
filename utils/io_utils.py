@@ -4,8 +4,10 @@ File I/O utilities for RIR inference.
 
 import os
 import json
+import hashlib
 import torch
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -98,8 +100,49 @@ def save_config_summary(config: Dict, data_params: Dict, args: Any, save_path: s
     print(f"Config summary saved to: {output_path}")
 
 
+_SPLIT_ID_COLUMNS = ['scene', 'receiver_region', 'receiver_idx', 'source_idx']
+
+
+def save_split_identities(run_dir: str, datasets, names=('train', 'eval', 'test')) -> Path:
+    """
+    Write the rows each split holds, so the data a run saw stays recoverable even after
+    the mapping CSV changes. Identity is the columns that name a pair, not row order.
+    """
+    frames = []
+    for name, ds in zip(names, datasets):
+        cols = [c for c in _SPLIT_ID_COLUMNS if c in ds.mapping.columns]
+        frame = ds.mapping[cols].copy()
+        frame.insert(0, 'split', name)
+        frames.append(frame)
+
+    out_path = Path(run_dir) / 'splits.csv.gz'
+    pd.concat(frames, ignore_index=True).to_csv(out_path, index=False, compression='gzip')
+    print(f"Split identities saved to: {out_path}  ({sum(len(f) for f in frames):,} rows)")
+    return out_path
+
+
+def _fingerprint(path: Optional[str], started_at: datetime) -> Optional[Dict]:
+    """Identify an input file, and flag it when it was written after the run began."""
+    if not path or not os.path.exists(path):
+        return None
+    digest, lines = hashlib.md5(), 0
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 22), b''):
+            digest.update(chunk)
+            lines += chunk.count(b'\n')
+    stat = os.stat(path)
+    return {
+        'path':        str(path),
+        'md5':         digest.hexdigest(),
+        'size_bytes':  stat.st_size,
+        'lines':       lines,
+        'modified':    datetime.fromtimestamp(stat.st_mtime).isoformat(timespec='seconds'),
+        'modified_during_run': stat.st_mtime > started_at.timestamp(),
+    }
+
+
 def save_run_config(run_dir: str, args, model_config: Dict, ie_config: Optional[Dict],
-                    git_hash: str) -> None:
+                    git_hash: str, dataset=None, started_at: Optional[datetime] = None) -> None:
     """Save all training settings as a single human-readable JSON for reproducibility."""
     import socket
 
@@ -108,14 +151,25 @@ def save_run_config(run_dir: str, args, model_config: Dict, ie_config: Optional[
             return obj.tolist()
         return str(obj)
 
+    saved_args = vars(args).copy()
+    if dataset is not None:   # the rate the RIRs are stored at, and sr_target as resolved
+        saved_args.update(sr_native=dataset.sr_native, sr_target=dataset.sr_target)
+
     record = {
         "timestamp": datetime.now().isoformat(timespec='seconds'),
         "git_hash": git_hash,
         "host": socket.gethostname(),
-        "args": vars(args),
+        "args": saved_args,
         "model_config": model_config,
         "image_encoder_config": ie_config,
     }
+
+    if started_at is not None:
+        record["inputs"] = {
+            "started_at":   started_at.isoformat(timespec='seconds'),
+            "mapping_csv":  _fingerprint(saved_args.get('mapping_csv'), started_at),
+            "geometry_csv": _fingerprint(saved_args.get('geometry_csv'), started_at),
+        }
 
     out_path = Path(run_dir) / "run_config.json"
     with open(out_path, 'w') as f:

@@ -1,6 +1,7 @@
 import os
 import json
 import argparse
+from datetime import datetime
 from accelerate import Accelerator
 import torch
 from torch.utils.data import DataLoader
@@ -17,7 +18,7 @@ from diffusers import DDPMScheduler
 from trainer import DiffusionTrainer
 from utils.misc import str2bool, filter_threshold, get_git_hash, build_run_header, get_full_path
 from utils.epoch_subset_sampler import EpochSubsetSampler
-from utils.io_utils import save_run_config
+from utils.io_utils import save_run_config, save_split_identities
 
 _DEFAULT_CFG     = 'model_config_VisualCond_HighRes_PosEnc512.json'
 
@@ -206,6 +207,7 @@ def _run_post_train_eval(model_dir: str, batch_size: int) -> None:
 
 # ------------------------- Main --------------------------
 def main():
+    started_at = datetime.now()   # inputs written after this are flagged in run_config
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -315,7 +317,8 @@ def main():
     if accelerator.is_main_process:
         configs_dir = os.path.join(model_path, 'configs')
 
-        save_run_config(model_path, args, model.config, ie_config, git_hash)
+        save_run_config(model_path, args, model.config, ie_config, git_hash, train_dataset, started_at)
+        save_split_identities(model_path, (train_dataset, eval_dataset, test_dataset))
 
         with open(os.path.join(configs_dir, 'model_config.json'), 'w') as f:
             json.dump(model.config, f, indent=2)
