@@ -1,4 +1,5 @@
 import os
+import math
 import time
 import datetime
 import logging
@@ -144,13 +145,25 @@ class DiffusionTrainer():
         epoch_norm_loss = 0.0
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{self.epochs} [Train]")
 
-        for batch in progress_bar:
+        for step, batch in enumerate(progress_bar):
             loss_value, norm_loss_value = self._forward_step(batch, training=True, scaler=scaler)
+            self._assert_finite_loss(loss_value, epoch, step, batch)
             if self.accelerator.is_main_process:
                 epoch_loss      += loss_value
                 epoch_norm_loss += norm_loss_value
 
         return epoch_loss, epoch_norm_loss
+
+    def _assert_finite_loss(self, loss_value, epoch, step, batch):
+        """Stop the run on a non-finite loss, which no later epoch can recover from."""
+        if math.isfinite(loss_value):
+            return
+        msg = (f"Loss is {loss_value} at epoch {epoch+1}, step {step+1}. "
+               f"Batch peak |rir| {batch['rir'].abs().amax().item():.3g}, "
+               f"scenes {sorted(set(batch['scene']))[:4]}. "
+               f"Values above 65504 overflow the mixed-precision forward pass.")
+        logging.error(msg)
+        raise RuntimeError(msg)
 
     def _evaluation_epoch(self, eval_dataloader, epoch):
         """Complete evaluation epoch"""
