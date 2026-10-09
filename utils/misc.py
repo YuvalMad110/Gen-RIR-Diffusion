@@ -214,7 +214,7 @@ def get_full_path(path_arg: str, subdir: str) -> Path:
 
     Examples:
         get_full_path('Jun08_19-28-08_dsief06', 'outputs/finished')
-        get_full_path('model_config_VisualCond.json', 'config')
+        get_full_path('model_config_VisualCond_MP3D.json', 'config')
     """
     p = Path(path_arg)
     if not p.is_absolute() and len(p.parts) == 1:

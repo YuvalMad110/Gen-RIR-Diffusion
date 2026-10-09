@@ -20,13 +20,13 @@ from utils.misc import str2bool, filter_threshold, get_git_hash, build_run_heade
 from utils.epoch_subset_sampler import EpochSubsetSampler
 from utils.io_utils import save_run_config, save_split_identities
 
-_DEFAULT_CFG     = 'model_config_VisualCond_HighRes_PosEnc512.json'
+_DEFAULT_CFG     = 'model_config_VisualCond_MP3D.json'
 
 """
-# SoundSpaces — scalar conditioning only (no images):
+# Replica — the scene dataset has to be named, since matterport3d is the default:
 CUDA_VISIBLE_DEVICES=1 python3 ./Projects/Gen-RIR-Diffusion/run_train.py \
-    --batch-size 58 \
-    --model-config model_config_VisualCond_HighRes_NoDist.json \
+    --batch-size 58 --scene-dataset replica \
+    --model-config model_config_VisualCond_HighRes_PosEnc512.json \
     |& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
 
 # Smoke test before a long run — one epoch over a meaningful percentage of the dataset,
@@ -41,7 +41,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     # Model configuration
     parser.add_argument('--model-config', type=str, default=_DEFAULT_CFG,
-                        help='Path to model config JSON. Use model_config_VisualCond.json for image conditioning.')
+                        help='Path to model config JSON, relative to config/ or absolute')
 
     # Dataset selection
     parser.add_argument('--scene-dataset', type=str, default='matterport3d',

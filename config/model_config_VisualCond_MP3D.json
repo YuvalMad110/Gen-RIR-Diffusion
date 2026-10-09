@@ -1,0 +1,53 @@
+{
+  "_section_unet": "UNet Architecture",
+  "block_out_channels": [32, 64, 128],
+  "layers_per_block": 2,
+  "use_cross_attention": null,
+  "attention_head_dim": 2,
+  "norm_num_groups": null,
+  "use_mid_block": true,
+  "in_channels": 2,
+  "out_channels": 2,
+
+  "_section_scalar_cond": "Scalar Conditioning MLP",
+  "use_cond_encoder": true,
+  "encoder_hidden_dims": [64, 128],
+  "src_trgt_dist_cond": true,
+
+  "_section_pos_encoder": "Fourier Positional Encoder (applied before condition MLP)",
+  "pos_encoder_cfg": {
+    "enable": true,
+    "encode_mode": "full",
+    "n_freqs": 6,
+    "log_scale": true,
+    "include_raw": true,
+    "max_freq_log2": 4.0,
+    "input_norm": [15, 15, 5, 15, 15, 5, 15, 15, 5, 3.0, 15]
+  },
+
+  "_section_image_cond": "Image Conditioning",
+  "image_fusion": "cross_attn",
+  "fusion_enable": true,
+  "image_encoder_config": {
+    "model_variant": "large",
+    "feature_mode": "pyramid",
+    "last_n": 4,
+    "layer_combination": "fuse",
+    "spatial_pool_factor": null,
+    "image_size": [224, 294]
+  },
+
+  "_section_guidance": "Classifier-Free Guidance",
+  "guidance_enabled": true,
+  "guidance_dropout_prob": 0.1,
+
+  "_section_loss": "Loss Weighting (training only; standard MSE if: key omitted, set to null, or method='none')",
+  "loss_weighting": null,
+  "_loss_weighting": [
+    "Off deliberately. 'rt60_binary' zeroes the loss for every frame after the RIR has faded by db_threshold, so the model gets no gradient from the tail — the same thing --apply-zero-tail does to the signal, which we stopped doing so the tail would be learned rather than deleted.",
+    "Worth trying once a no-mask baseline exists. Its cutoff is rt60 * |db_threshold| / 60, which assumes a straight decay and reads the stored rt60; since every fit window under-reads by 10-30%, the cutoff lands earlier than the threshold implies."
+  ],
+
+  "_Note": "Every top-level key starting with '_' is for documentation purposes and is not used in the code.",
+  "_image_size": "Matterport3D is rendered at 224x294, giving a 16x21 = 336-patch grid per image. With 5 images per sample that is 1680 cross-attention tokens. If VRAM is tight, set spatial_pool_factor to 2 rather than shrinking image_size, so the backbone still runs at the rendered resolution."
+}
