@@ -29,6 +29,8 @@ All models: 3-block UNet [32, 64, 128], STFT spectrogram (2×129×345), sr=22050
 | Aug11\_23-51-50\_dsief06 | **First Fourier PE run**; `encoder_hidden_dims=[256,512]`; `cross_attention_dim=512`; PE output 143→256→512; batch=32 | 13.19%† | 4.37 | 13.02 | 5.08 |
 | Aug13\_11-37-00\_dsief08 | **Ablation: no PE**, same `encoder_hidden_dims=[256,512]` as Aug11 — isolates PE contribution; batch=32; sample\_max\_sec=0.6 | 10.49%† | 5.67 | 12.43 | 5.93 |
 | Aug13\_14-41-14\_dsief07 | Standard `[64,128]`, no PE; batch=8; sample\_max\_sec=0.6; 50 epochs (best=29) | 12.13%† | 5.48 | 12.58 | 5.06 |
+| Aug17\_10-37-35\_dsief08 | Fourier PE; `encoder_hidden_dims=[256,512]`; `scale_rir=False`; no mask loss; batch=58; 70 epochs (best=52) | ⚠ 432%† | 6.31 | 13.00 | 9.91 |
+| Aug17\_18-44-51\_dsief08 | Fourier PE; `encoder_hidden_dims=[256,512]`; `scale_rir=True`; **RT60-binary mask loss** (`db_threshold=−40`); batch=58; 70 epochs (best=24) | 13.97%† | 6.53 | 11.73 | 7.70 |
 
 † T60 fit range (−5, −25 dB).
 
@@ -38,6 +40,41 @@ All models: 3-block UNet [32, 64, 128], STFT spectrogram (2×129×345), sr=22050
 
 | Run | 125 Hz | 250 Hz | 500 Hz | 1 kHz | 2 kHz | 4 kHz |
 |---|---|---|---|---|---|---|
+
+---
+
+## External Baselines (SoundSpaces/Replica)
+
+> Same test split as above (1,982 pairs). Evaluated via `Gen-RIR-Baselines/run_evaluation.py`.  
+> T60 fit range (−5, −25 dB). Image2Reverb input: first room-overview RGB, resized to 224×224.
+
+### Baseline Implementation Status
+
+| Baseline | Adapter | Full eval (1982) | Notes |
+|---|---|---|---|
+| Image2Reverb | ✅ done | ⚠ only 31-sample debug on disk — need full run | `image2reverb/debug/eval_summary.txt` has 31 samples; numbers in table below may be from earlier full run |
+| AV-RIR | ✅ done | ✅ done | `evaluations/replica_small_rooms/av_rir_zeros/` and `av_rir_gray/` — 1982 samples each |
+| Rec-RIR | ✅ done | ❌ not run yet | adapter at `rec_rir/adapter.py`; mamba-ssm installed; run `python3 pre_generate.py --baseline rec_rir --debug-mode` |
+| FAST-RIR | ❌ not written | ❌ | submodule at `fast_rir/FAST-RIR/`; **no data regeneration needed** — train directly on SoundSpaces dataloader (`image_root=None`, images off); input is `[mic_xyz, src_xyz, L, W, H, rt60]` normalized by /5−1 |
+| MESH2IR | ❌ low priority | ❌ | requires mesh pointcloud input + trained on GWA; would need full retraining on SoundSpaces meshes |
+
+### Metric Results
+
+| Baseline | Input | T60 % | DRR Abs (dB) | LSD (dB) | C50 MAE (dB) |
+|---|---|---|---|---|---|
+| Image2Reverb | RGB image | 142.47% (median 117.12%) | 8.70 | 13.52 | 12.34 |
+| AV-RIR zeros | Reverb speech + RGB image (geo-mat: zeros) | 38.86% (median 32.03%) | 4.76 | 10.27 | 5.42 |
+| AV-RIR gray | Reverb speech + RGB image (geo-mat: gray 128) | 38.51% (median 31.87%) | 4.76 | 10.27 | 5.43 |
+
+> **AV-RIR note:** Geo-mat images are unavailable for Replica (requires Tag2Text + Grounding DINO, not released). The two variants substitute a constant zero tensor and a constant gray (pixel=128) tensor respectively. Near-identical results confirm the geo-mat branch contributes only a fixed offset with a constant input. Speech conditioning: round-robin over LibriSpeech test-clean (`.flac`), resampled to 16 kHz, convolved with the reference RIR.
+
+### Per-Octave-Band T60 % Error — Baselines
+
+| Baseline | 125 Hz | 250 Hz | 500 Hz | 1 kHz | 2 kHz | 4 kHz |
+|---|---|---|---|---|---|---|
+| Image2Reverb | 134.83% | 111.02% | 94.45% | 91.32% | 113.01% | 149.49% |
+| AV-RIR zeros | 40.04% | 33.19% | 32.50% | 34.90% | 33.13% | 33.18% |
+| AV-RIR gray | 39.23% | 32.21% | 31.33% | 33.90% | 32.74% | 32.84% |
 
 ---
 
