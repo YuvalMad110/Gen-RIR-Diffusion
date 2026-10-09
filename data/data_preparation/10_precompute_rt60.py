@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """
-Precompute RT60 for all SoundSpaces/Replica pairs and store as a column in
-soundspaces_replica_mapping.csv.
+Precompute RT60 for every SoundSpaces pair the dataset can draw and store it as an
+rt60 column in that dataset's mapping CSV.
 
-Rows whose WAV file is empty or missing (valid=False) are skipped. Valid rows
-where T60 estimation fails (EDC doesn't decay far enough) are kept but their
-rt60 cell is left as NaN — they remain usable for regular training but are
-excluded when --use-rt60-condition is active.
+Rows whose WAV file is empty or missing (valid=False) are skipped, as are Matterport3D
+cross-region pairs, which the dataset never serves. Valid rows where T60 estimation
+fails (EDC doesn't decay far enough) are kept but their rt60 cell is left as NaN — they
+remain usable for regular training but are excluded when --use-rt60-condition is active.
 
-Per-scene RT60 NaN counts are appended to soundspaces_scene_stats.txt so the
-scale of the problem is visible at a glance.
+Per-scene RT60 NaN counts are written to the dataset's scene-stats file so the scale of
+the problem is visible at a glance.
 
-Run once before --use-rt60-condition training. If the 'rt60' column already
-exists, the script exits without touching the file (pass --force to recompute
-and overwrite).
+Run once per dataset before --use-rt60-condition training. If the 'rt60' column already
+exists, the script exits without touching the file (pass --force to recompute and
+overwrite).
 
 Usage:
-    python3 data/data_preparation/10_precompute_rt60.py
-    python3 data/data_preparation/10_precompute_rt60.py --force
-    python3 data/data_preparation/10_precompute_rt60.py \
-        --mapping-csv data/soundspaces_replica_mapping.csv \
-        --rir-root /dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica
+    python3 data/data_preparation/10_precompute_rt60.py --scene-dataset replica
+    python3 data/data_preparation/10_precompute_rt60.py --scene-dataset matterport3d
+    python3 data/data_preparation/10_precompute_rt60.py --scene-dataset replica --force
 """
 
 import argparse
@@ -38,67 +36,67 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from utils.acoustic_metrics import compute_t60
+from data.soundspaces import DATASET_DEFAULTS, _room_keys, _subsample_rooms
+from scene_stats import merge_notes, write_scene_stats
 
-_DEFAULT_MAPPING_CSV = os.path.join(project_root, 'data', 'replica', 'soundspaces_replica_mapping.csv')
-_DEFAULT_RIR_ROOT    = '/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica'
-_STATS_FILE          = Path(project_root) / 'data' / 'replica' / 'analysis' / 'soundspaces_scene_stats.txt'
+_STATS_DIR = {'replica': 'replica', 'matterport3d': 'matterport3d'}
+
+
+def fit_range(text):
+    """
+    Parse a dB range given as two comma-separated values, such as '-15,-40'. Either order
+    is accepted. Returns (upper, lower), the order compute_t60 takes.
+
+    Comma-separated rather than two arguments because argparse reads a leading minus as
+    the start of another flag; for the same reason the option must be written with an
+    equals sign, --fit-range=-15,-40.
+    """
+    try:
+        first, second = (float(part) for part in text.split(','))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected two dB values as 'hi,lo', got {text!r}")
+    if first == second:
+        raise argparse.ArgumentTypeError(f'range needs two different values, got {text!r}')
+    return max(first, second), min(first, second)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mapping-csv', default=_DEFAULT_MAPPING_CSV,
-                        help='Path to soundspaces_replica_mapping.csv')
-    parser.add_argument('--rir-root', default=_DEFAULT_RIR_ROOT,
-                        help='Root directory of SoundSpaces binaural RIRs')
+    parser.add_argument('--scene-dataset', choices=sorted(DATASET_DEFAULTS), required=True,
+                        help='Which dataset to compute RT60 for')
+    parser.add_argument('--mapping-csv', default=None,
+                        help="Path to the mapping CSV (default: the dataset's own)")
+    parser.add_argument('--rir-root', default=None,
+                        help="Root directory of SoundSpaces binaural RIRs (default: the dataset's own)")
+    parser.add_argument('--capped-only', action='store_true',
+                        help='Cover only the rows the per-room cap keeps, which trains on the same set for a fraction of the RIRs; leaves the rest NaN')
+    parser.add_argument('--random-seed', type=int, default=42,
+                        help='Seed the per-room cap draws from; must match the training seed')
+    parser.add_argument('--fit-range', type=fit_range, default=None,
+                        help="dB range the decay line is fitted over, as --fit-range=-15,-40 (default: the dataset's t60_fit_range). The equals sign is required, since a leading minus otherwise reads as another flag")
     parser.add_argument('--force', action='store_true',
                         help='Recompute and overwrite existing rt60 column')
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    d = DATASET_DEFAULTS[args.scene_dataset]
+    args.mapping_csv  = args.mapping_csv or d['mapping_csv']
+    args.rir_root     = args.rir_root    or d['rir_root']
+    args.geometry_csv = d['geometry_csv']
+    # The config is the declared window for this dataset; it travels into run_config.json
+    # from there, so overriding it here without updating it leaves the two disagreeing.
+    args.fit_range    = args.fit_range or tuple(d['t60_fit_range'])
+    args.stats_file  = (Path(project_root) / 'data' / _STATS_DIR[args.scene_dataset]
+                        / 'analysis' / 'soundspaces_scene_stats.txt')
+    return args
 
 
-def update_scene_stats(mapping: pd.DataFrame, stats_path: Path) -> None:
-    """Regenerate soundspaces_scene_stats.txt from the mapping DataFrame."""
-    scenes = sorted(mapping['scene'].unique())
-    rows = []
-    for scene in scenes:
-        sm = mapping[mapping['scene'] == scene]
-        n_valid   = int((sm['valid'] == True).sum())
-        n_invalid = int((sm['valid'] != True).sum())
-        n_total   = len(sm)
-        valid_rows = sm[sm['valid'] == True]
-        n_rt60_nan = int(valid_rows['rt60'].isna().sum()) if 'rt60' in sm.columns else None
-        rows.append((scene, n_valid, n_invalid, n_rt60_nan, n_total))
-
-    total_valid   = sum(r[1] for r in rows)
-    total_invalid = sum(r[2] for r in rows)
-    total_nan     = sum(r[3] for r in rows if r[3] is not None)
-    total_total   = sum(r[4] for r in rows)
-
-    lines = [
-        "SoundSpaces/Replica — RIR pairs per scene",
-        "==========================================",
-        f"{'Scene':<28} {'Valid':>8} {'Invalid':>8} {'RT60 NaN':>10} {'Total':>8}",
-        "-" * 66,
-    ]
-    for scene, n_valid, n_invalid, n_nan, n_total in rows:
-        nan_str = f"{n_nan:>10,}" if n_nan is not None else f"{'—':>10}"
-        lines.append(f"{scene:<28} {n_valid:>8,} {n_invalid:>8,} {nan_str} {n_total:>8,}")
-    lines += [
-        "-" * 66,
-        f"{'TOTAL':<28} {total_valid:>8,} {total_invalid:>8,} {total_nan:>10,} {total_total:>8,}",
-        "",
-        "GTU dataset: 15,202 samples (single pickle, in-memory)",
-        "",
-        "Notes:",
-        "  - Each pair = one (receiver, source) directed RIR",
-        "  - Invalid  = WAV file missing or empty (0 bytes)",
-        "  - RT60 NaN = valid WAV where T60 estimation failed (EDC too short/dry)",
-        "              these rows are usable for regular training but excluded",
-        "              from --use-rt60-condition runs",
-        "  - SoundSpaces samples all positions at a fixed ear height (~1.5m above floor)",
-        "  - All 18 scenes are single-floor in the acoustic data",
-    ]
-    stats_path.write_text("\n".join(lines) + "\n")
-    print(f"Scene stats updated: {stats_path}")
+def region_counts(geometry_csv: str) -> dict:
+    """Regions per scene, which only the geometry CSV knows: a region holding no
+    navigable node never reaches the mapping."""
+    if not os.path.exists(geometry_csv):
+        return {}
+    g = pd.read_csv(geometry_csv, comment='#')
+    return g.groupby('scene').size().to_dict()
 
 
 def main():
@@ -112,9 +110,20 @@ def main():
         return
 
     valid_mask = mapping['valid'] == True
+    if args.scene_dataset == 'matterport3d':
+        valid_mask &= mapping['same_region'] == True
     valid_rows = mapping[valid_mask]
-    n_invalid  = (~valid_mask).sum()
-    print(f"Processing {len(valid_rows):,} valid rows (skipping {n_invalid:,} invalid).")
+    n_skipped  = (~valid_mask).sum()
+    print(f"Processing {len(valid_rows):,} rows (skipping {n_skipped:,} the dataset never serves).")
+
+    cap = DATASET_DEFAULTS[args.scene_dataset]['max_pairs_per_room']
+    if args.capped_only and cap is not None:
+        # The cap is idempotent, so covering just the rows it keeps gives training the
+        # same set it would get from a full pass. _orig carries the mapping index through.
+        valid_rows = valid_rows.assign(_orig=valid_rows.index)
+        valid_rows = _subsample_rooms(valid_rows, _room_keys(valid_rows, args.scene_dataset),
+                                      cap, args.random_seed).set_index('_orig')
+        print(f"  --capped-only: narrowed to {len(valid_rows):,} rows at cap={cap}, seed={args.random_seed}.")
 
     rt60_series = pd.Series(np.nan, index=mapping.index, dtype=float)
     n_nan = 0
@@ -126,7 +135,7 @@ def main():
         channel = int(row['best_channel'])
         rir = waveform[channel].numpy()             # [T]
 
-        t60 = compute_t60(rir, sr)
+        t60 = compute_t60(rir, sr, fit_range=args.fit_range)
         if np.isnan(t60):
             print(f"  [T60 NaN] {row['scene']} / {row['rir_path']} (EDC too short/dry — skipped)")
             n_nan += 1
@@ -136,19 +145,32 @@ def main():
 
     mapping['rt60'] = rt60_series
 
-    # Write mapping CSV (preserve comment header)
+    # Write mapping CSV, keeping the comment header and recording how rt60 was produced.
+    # The fit range is the one setting that cannot be recovered from the column itself,
+    # and it is the one most likely to change, so it belongs beside the values.
+    hi, lo = args.fit_range
+    note = (f'# rt60: reverberation time in seconds. Least-squares fit over the {hi:g}..{lo:g} dB\n'
+            f'#       range of the energy decay curve, extrapolated to -60 dB. Measured on the\n'
+            f'#       whole recording at its native sample rate, with no sample_max_sec crop.')
+
     with open(args.mapping_csv, 'r') as f:
         comment_lines = [l for l in f if l.startswith('#')]
 
     with open(args.mapping_csv, 'w') as f:
-        f.writelines(comment_lines)
+        f.writelines(merge_notes(comment_lines, [note]))
         f.write(mapping.to_csv(index=False))
 
     n_ok = len(valid_rows) - n_nan
     print(f"\nDone. RT60 computed for {n_ok:,} rows, {n_nan} NaN (T60 estimation failed).")
     print(f"Mapping saved to {args.mapping_csv}.")
 
-    update_scene_stats(mapping, _STATS_FILE)
+    if args.capped_only and cap is not None:
+        print(f"\nThis was a --capped-only pass, so the rows beyond the cap are still NaN and the"
+              f"\nscene stats are left alone — their NaN counts would read as estimation failures."
+              f"\nCover the rest with: --scene-dataset {args.scene_dataset} --force")
+    else:
+        write_scene_stats(mapping, args.scene_dataset, args.stats_file,
+                          region_counts(args.geometry_csv))
 
 
 if __name__ == '__main__':

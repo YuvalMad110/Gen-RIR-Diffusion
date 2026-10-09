@@ -34,6 +34,10 @@ import pickle
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
+
+from scene_stats import carry_over_columns, write_scene_stats
+
 ANGLES = [0, 90, 180, 270]
 
 DEFAULT_METADATA_ROOT = "/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/metadata/replica"
@@ -260,6 +264,9 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     output_file = args.output_dir / "soundspaces_replica_mapping.csv"
 
+    # Keep the columns other scripts attached; a pair holds its identity across rebuilds.
+    columns = CSV_COLUMNS + carry_over_columns(output_file, all_rows, ['rt60'])
+
     with open(output_file, "w", newline="") as f:
         f.write(f"# SoundSpaces Replica — Mono-RIR Mapping\n")
         f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -282,7 +289,7 @@ def main():
         f.write("# Verify this assumption visually when rendering images with 03_render_replica_images.py.\n")
         f.write("#\n")
 
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
         writer.writerows(all_rows)
 
@@ -306,33 +313,8 @@ def main():
     print(f"  left  (0): {channel_counts[0]:>7,}  ({100*channel_counts[0]/total_valid:.1f}%)")
     print(f"  right (1): {channel_counts[1]:>7,}  ({100*channel_counts[1]/total_valid:.1f}%)")
 
-    # Write per-scene stats file
-    stats_file = args.output_dir / "analysis" / "soundspaces_scene_stats.txt"
-    stats_file.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
-        "SoundSpaces/Replica — RIR pairs per scene",
-        "==========================================",
-        f"{'Scene':<28} {'Valid':>8} {'Invalid':>8} {'Total':>8}",
-        "-" * 56,
-    ]
-    for s in all_stats:
-        lines.append(
-            f"{s['scene']:<28} {s['n_valid']:>8,} {s['n_invalid']:>8,} {s['n_pairs_written']:>8,}"
-        )
-    lines += [
-        "-" * 56,
-        f"{'TOTAL':<28} {total_valid:>8,} {total_invalid:>8,} {total_pairs:>8,}",
-        "",
-        "GTU dataset: 15,202 samples (single pickle, in-memory)",
-        "",
-        "Notes:",
-        "  - Each pair = one (receiver, source) directed RIR",
-        "  - Invalid = WAV file missing or empty (0 bytes)",
-        "  - SoundSpaces samples all positions at a fixed ear height (~1.5m above floor)",
-        "  - All 18 scenes are single-floor in the acoustic data",
-    ]
-    stats_file.write_text("\n".join(lines) + "\n")
-    print(f"Scene stats saved to: {stats_file}")
+    write_scene_stats(pd.DataFrame(all_rows, columns=columns), 'replica',
+                      args.output_dir / "analysis" / "soundspaces_scene_stats.txt")
 
 
 if __name__ == "__main__":
