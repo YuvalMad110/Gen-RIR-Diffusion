@@ -108,7 +108,8 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, src_trgt_
             if use_baseline:
                 rt60_estimates = None if data_info.get('use_rt60_condition', False) else compute_t60_batch(real_waveforms, sr, args.t60_fit_range)
                 baseline_waveforms = generate_synthetic_rirs_batch(
-                    conditions_np, sr, max_length_samples=None, method=args.baseline_method, verbose=False, rt60_estimates=rt60_estimates, dataset_name=data_info.get('dataset_name', 'gtu'))
+                    conditions_np, sr, center_relative_positions=True,
+                    max_length_samples=None, method=args.baseline_method, verbose=False, rt60_estimates=rt60_estimates)
 
             # --- Generate diffusion RIRs ---
             channels = 2  # Real + Imag for spectrogram

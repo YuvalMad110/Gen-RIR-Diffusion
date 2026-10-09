@@ -257,7 +257,8 @@ def main():
     # Estimate max RIR length based on longest RT60
     max_rt60 = conditions[:, 9].max()
     max_length_samples = int(max_rt60 * sr * 1.5)  # 1.5x RT60 should capture decay
-    synthetic_rirs = generate_synthetic_rirs_batch(conditions, sr, max_length_samples, method=args.rir_method)
+    synthetic_rirs = generate_synthetic_rirs_batch(conditions, sr, center_relative_positions=False,
+                                                   max_length_samples=max_length_samples, method=args.rir_method)
 
     # ---------- Generate diffusion RIRs ----------
     print("\nGenerating RIRs with diffusion model...")

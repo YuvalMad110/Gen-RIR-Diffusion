@@ -9,18 +9,17 @@ import sys
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-from data.rir_dataset import load_rir_dataset
+from data.soundspaces import DATASET_DEFAULTS, create_soundspaces_datasets
 from data.dataset_collate_fn import scale_and_spectrogram_collate_fn
 from RIRDiffusionModel import RIRDiffusionModel
 from image_encoder import ImageEncoder
 from diffusers import DDPMScheduler
 from trainer import DiffusionTrainer
-from utils.misc import str2bool, get_git_hash, build_run_header, get_full_path
+from utils.misc import str2bool, filter_threshold, get_git_hash, build_run_header, get_full_path
 from utils.epoch_subset_sampler import EpochSubsetSampler
 from utils.io_utils import save_run_config
 
 _DEFAULT_CFG     = 'model_config_VisualCond_HighRes_PosEnc512.json'
-_DEFAULT_SS_ROOT = '/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica/'
 
 """
 # SoundSpaces — scalar conditioning only (no images):
@@ -28,6 +27,12 @@ CUDA_VISIBLE_DEVICES=1 python3 ./Projects/Gen-RIR-Diffusion/run_train.py \
     --batch-size 58 \
     --model-config model_config_VisualCond_HighRes_NoDist.json \
     |& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
+
+# Smoke test before a long run — one epoch over a meaningful percentage of the dataset,
+# with the settings the real run will use:
+CUDA_VISIBLE_DEVICES=1 python3 ./Projects/Gen-RIR-Diffusion/run_train.py \
+    --batch-size 58 --nSamples 5800 --epochs 1 --post-train-eval false \
+    --scene-dataset matterport3d --model-config model_config_VisualCond_MP3D.json
 """
 
 # ------------------------- Utils --------------------------
@@ -38,20 +43,22 @@ def parse_args():
                         help='Path to model config JSON. Use model_config_VisualCond.json for image conditioning.')
 
     # Dataset selection
-    parser.add_argument('--dataset-name', type=str, default='soundspaces', choices=['soundspaces'],
-                        help='Dataset to train on')
+    parser.add_argument('--scene-dataset', type=str, default='matterport3d',
+                        choices=['replica', 'matterport3d'],
+                        help='Scene dataset the SoundSpaces RIRs were simulated in')
     parser.add_argument('--data-path', type=str, default=None,
-                        help='SoundSpaces RIR root directory (default: server path)')
-    parser.add_argument('--image-root', type=str, default='/dsi/gannot-lab/gannot-lab1/datasets/Replica_rendered/',
-                        help='Replica_rendered/ root; omit to disable image conditioning')
+                        help='SoundSpaces RIR root directory (default: per scene dataset)')
+    parser.add_argument('--image-root', type=str, default=None,
+                        help='Rendered-images root (default: per scene dataset); '
+                             'set --rir-view-type and --room-overview-type to none to disable images')
     parser.add_argument('--rir-view-type', type=str, default='rgb', choices=['rgb', 'depth', 'none'],
                         help="Per-pair image type: 'rgb', 'depth', or 'none' to disable")
     parser.add_argument('--room-overview-type', type=str, default='rgb', choices=['rgb', 'depth', 'none'],
                         help="Sensor type for scene-level overview images; 'none' to disable")
-    parser.add_argument('--room-overview-config', type=str, help='Path to JSON mapping scene → [corner_names]',
+    parser.add_argument('--room-overview-config', type=str, help='Replica only — JSON mapping scene → [corner_names]',
                         default='/home/yuvalmad/Projects/Gen-RIR-Diffusion/config/room_overviews/2views_top_mid_small_scenes.json')
     parser.add_argument('--scenes', type=str, nargs='+', default=None,
-                        help='Restrict SoundSpaces to specific scenes (default: all 18)')
+                        help='Restrict to specific scenes (default: all)')
     parser.add_argument('--use-rt60-condition', type=str2bool, default=True,
                         help='Append precomputed RT60 to the SoundSpaces condition vector (requires 10_precompute_rt60.py)')
 
@@ -69,6 +76,12 @@ def parse_args():
     # Audio / spectrogram
     parser.add_argument('--sample-max-sec', type=float, default=0.6, help='Max RIR length in seconds')
     parser.add_argument('--nSamples', type=int, default=None, help='Cap dataset size (None = all)')
+
+    # Quality filters: 'auto' takes the scene dataset's value, 'none' switches one off
+    parser.add_argument('--min-rt60', type=filter_threshold, default='auto', help='Drop pairs whose RT60 is below this, in seconds')
+    parser.add_argument('--max-void-indoor', type=filter_threshold, default='auto', help='Drop pairs in enclosed rooms whose own view is emptier than this')
+    parser.add_argument('--max-void-outdoor', type=filter_threshold, default='auto', help='Drop pairs in open-to-sky rooms whose own view is emptier than this')
+    parser.add_argument('--max-room-void', type=filter_threshold, default='auto', help='Drop enclosed rooms whose four overviews average emptier than this')
     parser.add_argument('--hop-length', type=int, default=64)
     parser.add_argument('--n-fft', type=int, default=256)
     parser.add_argument('--sr-target', type=int, default=22050, help='Target sampling rate')
@@ -87,11 +100,22 @@ def parse_args():
     parser.add_argument('--post-train-eval', type=str2bool, default=True, help='Run full_model_eval.py on the finished run directory after training completes')
 
     args = parser.parse_args()
-    if args.data_path is None:
-        args.data_path = _DEFAULT_SS_ROOT
+
+    # Resolve the scene-dataset defaults here so run_config.json records the values
+    # actually used rather than the Nones that stood in for them.
+    d = DATASET_DEFAULTS[args.scene_dataset]
+    args.data_path          = args.data_path  or d['rir_root']
+    args.image_root         = args.image_root or d['image_root']
+    args.mapping_csv        = d['mapping_csv']
+    args.geometry_csv       = d['geometry_csv']
+    args.max_pairs_per_room = d['max_pairs_per_room']
+    args.balance_split_by   = d['balance_split_by']
+    for name in ('min_rt60', 'max_void_indoor', 'max_void_outdoor', 'max_room_void'):
+        if getattr(args, name) == 'auto':
+            setattr(args, name, d[name])
     return args
 
-def load_model_config(config_path, dataset_name, use_rt60_condition=False):
+def load_model_config(config_path, use_rt60_condition=False):
     """Load and prepare model config. Returns (model_config, ie_config, src_trgt_dist_cond).
 
     Pops image_encoder_config into ie_config, converts image_size to tuple,
@@ -198,15 +222,19 @@ def main():
 
     # ---------- Model config ----------
     args.model_config = str(get_full_path(args.model_config, "config"))
-    model_config, ie_config, src_trgt_dist_cond, loss_weighting = load_model_config(args.model_config, args.dataset_name, args.use_rt60_condition)
+    model_config, ie_config, src_trgt_dist_cond, loss_weighting = load_model_config(args.model_config, args.use_rt60_condition)
 
     # ---------- Load datasets ----------
     print("\n----------- Loading datasets... -----------\n")
     rir_view_type      = None if args.rir_view_type      == 'none' else args.rir_view_type
     room_overview_type = None if args.room_overview_type == 'none' else args.room_overview_type
     image_size = ie_config.get('image_size') if ie_config else None
-    train_dataset, eval_dataset, test_dataset = load_rir_dataset(
-        name='soundspaces', rir_root=args.data_path, image_root=args.image_root,
+    train_dataset, eval_dataset, test_dataset = create_soundspaces_datasets(
+        scene_dataset=args.scene_dataset, rir_root=args.data_path, image_root=args.image_root,
+        mapping_csv=args.mapping_csv, geometry_csv=args.geometry_csv,
+        max_pairs_per_room=args.max_pairs_per_room, balance_split_by=args.balance_split_by,
+        min_rt60=args.min_rt60, max_void_indoor=args.max_void_indoor,
+        max_void_outdoor=args.max_void_outdoor, max_room_void=args.max_room_void,
         rir_view_type=rir_view_type, image_size=image_size,
         room_overview_type=room_overview_type,
         room_overview_config=args.room_overview_config,
@@ -222,7 +250,6 @@ def main():
     collate_fn = scale_and_spectrogram_collate_fn(
         sr=args.sr_target, db_cutoff=args.db_cutoff, n_fft=args.n_fft, hop_length=args.hop_length,
         scale_rir_flag=args.scale_rir, use_spectrogram=False, apply_zero_tail=args.apply_zero_tail,
-        dataset_type=args.dataset_name,
     )
     
     train_dataloader = make_train_dataloader(train_dataset, args, collate_fn)

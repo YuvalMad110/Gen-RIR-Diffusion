@@ -43,7 +43,7 @@ def build_run_header(args, ie_config, git_hash, model_config, sample_size):
 
     lines = [
         f"{_P}[Run]         Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Host: {socket.gethostname()} | Git: {git_hash}",
-        f"{_P}[Dataset]     Name: {args.dataset_name} | Split: {args.train_ratio:.2f}/{args.eval_ratio:.2f}/{args.test_ratio:.2f} | Seed: {args.random_seed} | nSamples: {args.nSamples}",
+        f"{_P}[Dataset]     Name: {args.scene_dataset} | Split: {args.train_ratio:.2f}/{args.eval_ratio:.2f}/{args.test_ratio:.2f} | Seed: {args.random_seed} | nSamples: {args.nSamples}",
         f"{_C}Scenes: {scenes_str}",
         f"{_P}[Audio]       SR: {args.sr_target} Hz | MaxSec: {args.sample_max_sec}s | n_fft: {args.n_fft} | hop: {args.hop_length} | dB: {args.db_cutoff} | scale: {args.scale_rir} | zero_tail: {args.apply_zero_tail}",
     ]
@@ -341,3 +341,19 @@ def str2bool(v):
     if v in ("yes","true","t","1","y","on"): return True
     if v in ("no","false","f","0","n","off"): return False
     raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def filter_threshold(v):
+    """
+    Parse a dataset filter threshold from the command line, which has three forms:
+    a number sets the threshold, 'none' switches that filter off, and 'auto' defers
+    to the scene dataset's own value. argparse runs this over string defaults too,
+    so 'auto' has to survive the round trip rather than being rejected as non-numeric.
+    """
+    if v is None or isinstance(v, float): return v
+    if v.lower() == "auto": return "auto"
+    if v.lower() in ("none", "null", "off"): return None
+    try:
+        return float(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError("Expected a number, 'none' or 'auto'.")

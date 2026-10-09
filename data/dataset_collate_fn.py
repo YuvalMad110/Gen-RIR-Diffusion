@@ -9,22 +9,21 @@ def scale_and_spectrogram_collate_fn(sr: float,
                                      hop_length: int = 64,
                                      scale_rir_flag: bool = True,
                                      use_spectrogram: bool = True,
-                                     apply_zero_tail: bool = False,
-                                     dataset_type: str = 'gtu'):
+                                     apply_zero_tail: bool = False):
     """
     Factory that returns a collate function for use with DataLoader.
 
-    Both GTU and SoundSpaces datasets guarantee that __getitem__ returns a
-    mono RIR tensor of shape [1, T]. The collate assumes this contract.
+    The SoundSpaces dataset guarantees that __getitem__ returns a mono RIR tensor
+    of shape [1, T]. The collate assumes this contract.
 
     The returned function produces a dict batch with keys:
         'rir'         — [B, 2, F, T] spectrogram or [B, 1, T] waveform
         'room_dim'    — [B, 3]
         'mic_loc'     — [B, 3]
         'speaker_loc' — [B, 3]
-        'scene'       — list[str]         (SoundSpaces only) scene name per sample
-        'rt60'        — [B]              (GTU always; SoundSpaces when use_rt60=True)
-        'images'      — [B, N, 3, H, W]  (SoundSpaces only, when images are present)
+        'scene'       — list[str]         scene name per sample
+        'rt60'        — [B]              when use_rt60=True
+        'images'      — [B, N, 3, H, W]  when images are present
                         N = number of images per RIR sample. Currently N=1
                         (one receiver→source RGB per pair); the design supports
                         N>1 for future additions (e.g. overview images).
@@ -37,7 +36,6 @@ def scale_and_spectrogram_collate_fn(sr: float,
         scale_rir_flag:  whether to apply RIR scaling
         use_spectrogram: whether to convert to spectrogram
         apply_zero_tail: whether to zero the signal after the db_cutoff point
-        dataset_type:    'gtu' or 'soundspaces'
     """
 
     def _process_rirs(rirs):
@@ -60,14 +58,6 @@ def scale_and_spectrogram_collate_fn(sr: float,
             'room_dim':    torch.stack([torch.tensor(r, dtype=torch.float32) for r in room_dims]),
             'mic_loc':     torch.stack([torch.tensor(m, dtype=torch.float32) for m in mic_locs]),
             'speaker_loc': torch.stack([torch.tensor(s, dtype=torch.float32) for s in speaker_locs]),
-        }
-
-    def gtu_collate(batch: List[Tuple]) -> dict:
-        rirs, room_dims, mic_locs, speaker_locs, rt60s = zip(*batch)
-        return {
-            'rir':  _process_rirs(rirs),
-            **_stack_locs(room_dims, mic_locs, speaker_locs),
-            'rt60': torch.tensor(rt60s, dtype=torch.float32),
         }
 
     def soundspaces_collate(batch: List[Tuple]) -> dict:
@@ -93,9 +83,4 @@ def scale_and_spectrogram_collate_fn(sr: float,
             d['images'] = torch.stack(images)   # [B, N, 3, H, W]
         return d
 
-    if dataset_type == 'gtu':
-        return gtu_collate
-    elif dataset_type == 'soundspaces':
-        return soundspaces_collate
-    else:
-        raise ValueError(f"Unknown dataset_type: {dataset_type!r}. Expected 'gtu' or 'soundspaces'.")
+    return soundspaces_collate

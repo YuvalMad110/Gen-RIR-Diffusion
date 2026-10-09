@@ -88,7 +88,7 @@ RIR_METHODS = {
 }
 
 
-def generate_synthetic_rirs_batch(conditions, sr, max_length_samples=None, method='pra', verbose=True, rt60_estimates=None, dataset_name='gtu'):
+def generate_synthetic_rirs_batch(conditions, sr, *, center_relative_positions, max_length_samples=None, method='pra', verbose=True, rt60_estimates=None):
     """Generate synthetic RIRs for a batch of conditions.
 
     Args:
@@ -98,9 +98,10 @@ def generate_synthetic_rirs_batch(conditions, sr, max_length_samples=None, metho
         max_length_samples: Maximum RIR length in samples (for truncation/padding)
         method: RIR generation method ('pra' for pyroomacoustics, 'habets' for RIR-Generator)
         verbose: Show tqdm progress bar (default True)
+        center_relative_positions: True when mic/speaker x,y are measured from the room centre, as
+                      SoundSpaces gives them; they are then shifted by (L/2, W/2) because the
+                      generators require corner-relative positions in [0,L]x[0,W].
         rt60_estimates: Per-sample RT60 values (seconds). Required when conditions are 9-dim (no RT60 in vector).
-        dataset_name: 'soundspaces' or 'gtu'. SoundSpaces positions are room-center-relative and must be
-                      shifted by (L/2, W/2) before passing to the generators.
 
     Returns:
         rirs: List of RIR waveforms (numpy arrays, float32)
@@ -125,8 +126,7 @@ def generate_synthetic_rirs_batch(conditions, sr, max_length_samples=None, metho
         else:
             raise ValueError("RT60 not in condition vector and no rt60_estimates provided")
 
-        # SoundSpaces u,v are room-center-relative; generators require corner-relative [0,L]x[0,W]
-        if dataset_name == 'soundspaces':
+        if center_relative_positions:
             L, W = room_dims[0], room_dims[1]
             mic_pos     = [mic_pos[0]     + L / 2, mic_pos[1]     + W / 2, mic_pos[2]]
             speaker_pos = [speaker_pos[0] + L / 2, speaker_pos[1] + W / 2, speaker_pos[2]]

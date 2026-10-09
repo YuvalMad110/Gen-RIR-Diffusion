@@ -1,0 +1,53 @@
+{
+  "_description": [
+    "Per-dataset definitions, loaded by data/soundspaces.py and exposed there as DATASET_DEFAULTS. Every key starting with an underscore is documentation and is dropped at load; its value may be a string or a list of lines.",
+    "mapping_csv and geometry_csv are relative to data/ so the repository moves as a unit, while rir_root and image_root are absolute because they point outside it. Changing a value here changes what every future run serves, so the resolved values are recorded in each run's run_config.json."
+  ],
+
+  "_t60_fit_range": [
+    "The dB range of the energy decay curve the stored rt60 column was fitted over, and the default 10_precompute_rt60.py uses. Unlike every other key here it describes data that already exists rather than a choice made at run time.",
+    "So it must change in the same breath as rebuilding the column: a new window written here while the CSV still holds the old values makes every run in between record a window its data was not built with. Script 10 also writes the window into the mapping's comment header, so the two can be compared."
+  ],
+
+  "replica": {
+    "_note": [
+      "18 densely sampled rooms, one per scene, so geometry is keyed by scene alone. Its data is the within-room sampling, so rooms are never capped, and the split is balanced by RIR count to hold the ratios. The RIR files' sample rate is 44.1 kHz.",
+      "All four quality filters are off: Replica was rendered densely in clean indoor rooms, so there is no void problem and no RT60 floor to enforce, and turning any of them on would change the splits the saved models were trained against."
+    ],
+    "mapping_csv":        "replica/soundspaces_replica_mapping.csv",
+    "geometry_csv":       "replica/room_geometry.csv",
+    "rir_root":           "/dsi/gannot-lab/gannot-lab1/datasets/SoundSpaces/binaural_rirs/replica",
+    "image_root":         "/dsi/gannot-lab/gannot-lab1/datasets/Replica_rendered",
+    "max_pairs_per_room": null,
+    "balance_split_by":   "rirs",
+    "t60_fit_range":      [-5, -25],
+    "min_rt60":           null,
+    "max_void_indoor":    null,
+    "max_void_outdoor":   null,
+    "max_room_void":      null
+  },
+
+  "matterport3d": {
+    "_note": [
+      "1119 rooms across 80 scenes, so geometry is keyed by (scene, region_idx) and rooms are identified through receiver_region. The ten largest rooms hold 43% of all RIRs, so rooms are capped and the split is balanced by room count to spread that diversity across train. The RIR files' sample rate is 16 kHz."
+    ],
+    "_max_pairs_per_room": [
+      "The cap is the dominant transformation of this dataset: it takes 965,952 pairs down to 270,067 and moves median RT60 from 0.489 s to 0.312 s, while dropping the ten largest rooms from 43% of the data to 3.7%.",
+      "The subsample is MD5-seeded per room, so it is idempotent and independent of which other rooms are loaded."
+    ],
+    "_void_filters": [
+      "void_frac is the share of a rendered image with no mesh behind it. Outdoor rooms are open to the sky and legitimately render emptier, so they carry a looser threshold than enclosed ones; max_room_void drops a room whose overview images are mostly void, since those give the model nothing to condition on."
+    ],
+    "mapping_csv":        "matterport3d/soundspaces_matterport3d_mapping.csv",
+    "geometry_csv":       "matterport3d/room_geometry.csv",
+    "rir_root":           "/dsi/fetaya-lab/yuvalmad/datasets/SoundSpaces/binaural_rirs/mp3d",
+    "image_root":         "/dsi/fetaya-lab/yuvalmad/datasets/Matterport3D/rendered_images",
+    "max_pairs_per_room": 1000,
+    "balance_split_by":   "rooms",
+    "t60_fit_range":      [-5, -25],
+    "min_rt60":           0.1,
+    "max_void_indoor":    0.4,
+    "max_void_outdoor":   0.8,
+    "max_room_void":      0.5
+  }
+}

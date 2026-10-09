@@ -1,3 +1,5 @@
+import hashlib
+
 import torch
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -28,6 +30,22 @@ def build_condition_tensor(batch, device: torch.device, src_trgt_dist_cond: bool
             dist = torch.norm(speaker_locs.float() - mic_locs.float(), dim=1, keepdim=True)
             parts.append(dist)
         return torch.cat(parts, dim=1).float().to(device)
+
+
+def _count_group_split(unique_groups, train_ratio, eval_ratio, test_ratio, seed):
+    """
+    Assign groups to train/eval/test so the requested ratios hold on group count.
+
+    Groups are ordered by an MD5 of their key and the seed, so the shuffle is stable
+    across runs and independent of the order they arrive in, then sliced by ratio.
+    """
+    ordered = sorted(unique_groups,
+                     key=lambda g: hashlib.md5(f"{g}|{seed}".encode()).hexdigest())
+    n_train = round(len(ordered) * train_ratio)
+    n_eval  = round(len(ordered) * eval_ratio)
+    return (set(ordered[:n_train]),
+            set(ordered[n_train:n_train + n_eval]),
+            set(ordered[n_train + n_eval:]))
 
 
 def _greedy_group_split(unique_groups, group_sizes, train_ratio, eval_ratio, test_ratio):
@@ -69,7 +87,8 @@ def _greedy_group_split(unique_groups, group_sizes, train_ratio, eval_ratio, tes
 
 
 def create_data_splits(items, group_keys=None, split_by_group=True,
-                       train_ratio=0.7, eval_ratio=0.15, test_ratio=0.15, seed=42):
+                       train_ratio=0.7, eval_ratio=0.15, test_ratio=0.15, seed=42,
+                       balance_by='rirs'):
     """
     Split items into train/eval/test lists.
 
@@ -91,6 +110,10 @@ def create_data_splits(items, group_keys=None, split_by_group=True,
         eval_ratio:      fraction for evaluation (default 0.15)
         test_ratio:      fraction for test (default 0.15)
         seed:            integer seed for reproducibility
+        balance_by:      'rirs' assigns groups so the item counts hit the ratios, which
+                         matters when a few groups hold most of the data; 'rooms' hits
+                         the ratios on group count instead, spreading group diversity
+                         across the splits and letting item counts land nearby
 
     Returns:
         (train_items, eval_items, test_items) — three lists of items
@@ -107,10 +130,15 @@ def create_data_splits(items, group_keys=None, split_by_group=True,
             raise ValueError(
                 f"Need at least 3 groups for a train/eval/test split, got {len(unique_groups)}."
             )
-        group_sizes = {g: sum(1 for gk in group_keys if gk == g) for g in unique_groups}
-        train_set, eval_set, test_set = _greedy_group_split(
-            unique_groups, group_sizes, train_ratio, eval_ratio, test_ratio
-        )
+        if balance_by == 'rooms':
+            train_set, eval_set, test_set = _count_group_split(
+                unique_groups, train_ratio, eval_ratio, test_ratio, seed
+            )
+        else:
+            group_sizes = {g: sum(1 for gk in group_keys if gk == g) for g in unique_groups}
+            train_set, eval_set, test_set = _greedy_group_split(
+                unique_groups, group_sizes, train_ratio, eval_ratio, test_ratio
+            )
 
         train_items = [item for item, gk in zip(items, group_keys) if gk in train_set]
         eval_items  = [item for item, gk in zip(items, group_keys) if gk in eval_set]

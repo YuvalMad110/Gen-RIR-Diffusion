@@ -97,9 +97,9 @@ def data_params_from_run_config(run_config: Dict) -> Dict:
         'train_ratio':         a.get('train_ratio', 0.7),
         'eval_ratio':          a.get('eval_ratio', 0.15),
         'test_ratio':          a.get('test_ratio', 0.15),
-        'split_by_room':       a.get('split_by_room', True),
+        'split_by_room':       a['split_by_room'],
         'random_seed':         a.get('random_seed', 42),
-        'dataset_name':        a['dataset_name'],
+        'scene_dataset':       a['scene_dataset'],
         'use_rt60_condition':  a['use_rt60_condition'],
     }
 
@@ -154,55 +154,51 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
         (test_dataset, test_dataloader)
     """
     import torch.utils.data
-    from data.rir_dataset import load_rir_dataset
+    from data.soundspaces import create_soundspaces_datasets
 
     if run_config is None:
         raise ValueError("run_config is required for build_test_dataloader")
 
-    dataset_name = data_params.get('dataset_name', 'soundspaces')
     nSamples = data_params.get('nSamples')
+    a = run_config['args']
+    ie_config = run_config.get('image_encoder_config')
 
-    if dataset_name == 'soundspaces':
-        a = run_config['args']
-        ie_config = run_config.get('image_encoder_config')
+    rir_view_type = None if a.get('rir_view_type') == 'none' else a.get('rir_view_type')
+    room_overview_type = None if a.get('room_overview_type') == 'none' else a.get('room_overview_type')
+    image_size = tuple(ie_config['image_size']) if ie_config and 'image_size' in ie_config else None
 
-        rir_view_type = None if a.get('rir_view_type') == 'none' else a.get('rir_view_type')
-        room_overview_type = None if a.get('room_overview_type') == 'none' else a.get('room_overview_type')
-        image_size = tuple(ie_config['image_size']) if ie_config and 'image_size' in ie_config else None
+    _, _, test_dataset = create_soundspaces_datasets(
+        scene_dataset=a['scene_dataset'],
+        rir_root=a.get('data_path'),
+        image_root=a.get('image_root'),
+        max_pairs_per_room=a['max_pairs_per_room'],
+        balance_split_by=a['balance_split_by'],
+        scenes=a.get('scenes'),
+        split=True,
+        split_by_room=data_params['split_by_room'],
+        train_ratio=data_params['train_ratio'],
+        eval_ratio=data_params['eval_ratio'],
+        test_ratio=data_params['test_ratio'],
+        random_seed=data_params['random_seed'],
+        sample_max_sec=data_params['sample_max_sec'],
+        sr_target=data_params['sr_target'],
+        rir_view_type=rir_view_type,
+        room_overview_type=room_overview_type,
+        room_overview_config=a.get('room_overview_config'),
+        image_size=image_size,
+        use_rt60=a.get('use_rt60_condition', False),
+    )
 
-        _, _, test_dataset = load_rir_dataset(
-            name='soundspaces',
-            rir_root=a.get('data_path'),
-            image_root=a.get('image_root'),
-            scenes=a.get('scenes'),
-            split=True,
-            split_by_room=data_params['split_by_room'],
-            train_ratio=data_params['train_ratio'],
-            eval_ratio=data_params['eval_ratio'],
-            test_ratio=data_params['test_ratio'],
-            random_seed=data_params['random_seed'],
-            sample_max_sec=data_params['sample_max_sec'],
-            sr_target=data_params['sr_target'],
-            rir_view_type=rir_view_type,
-            room_overview_type=room_overview_type,
-            room_overview_config=a.get('room_overview_config'),
-            image_size=image_size,
-            use_rt60=a.get('use_rt60_condition', False),
-        )
-
-        from data.dataset_collate_fn import scale_and_spectrogram_collate_fn
-        collate_fn = scale_and_spectrogram_collate_fn(
-            sr=data_params['sr_target'],
-            db_cutoff=data_params['db_cutoff'],
-            n_fft=data_params['n_fft'],
-            hop_length=data_params['hop_length'],
-            scale_rir_flag=False,
-            use_spectrogram=False,
-            apply_zero_tail=False,
-            dataset_type='soundspaces',
-        )
-    else:
-        raise ValueError(f"Unknown dataset_name: {dataset_name!r}. Expected 'soundspaces'.")
+    from data.dataset_collate_fn import scale_and_spectrogram_collate_fn
+    collate_fn = scale_and_spectrogram_collate_fn(
+        sr=data_params['sr_target'],
+        db_cutoff=data_params['db_cutoff'],
+        n_fft=data_params['n_fft'],
+        hop_length=data_params['hop_length'],
+        scale_rir_flag=False,
+        use_spectrogram=False,
+        apply_zero_tail=False,
+    )
 
     if nSamples is not None:
         test_size = int(nSamples * data_params['test_ratio'])
