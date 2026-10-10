@@ -76,6 +76,8 @@ def parse_args():
                         help='Seed the per-room cap draws from; must match the training seed')
     parser.add_argument('--fit-range', type=fit_range, default=None,
                         help="dB range the decay line is fitted over, as --fit-range=-15,-40 (default: the dataset's t60_fit_range). The equals sign is required, since a leading minus otherwise reads as another flag")
+    parser.add_argument('--stats-file', default=None,
+                        help="Where the per-scene statistics go (default: the dataset's analysis folder). Point it elsewhere when running against a copy of the mapping")
     parser.add_argument('--sr-target', type=int, default=None,
                         help="Resample before measuring scaled_peak (default: the dataset's sr_target)")
     parser.add_argument('--sample-max-sec', type=float, default=None,
@@ -98,8 +100,8 @@ def parse_args():
     for name in ('sr_target', 'sample_max_sec', 'n_fft', 'hop_length'):
         if getattr(args, name) is None:
             setattr(args, name, d[name])
-    args.stats_file  = (Path(project_root) / 'data' / _STATS_DIR[args.scene_dataset]
-                        / 'analysis' / 'soundspaces_scene_stats.txt')
+    args.stats_file  = Path(args.stats_file) if args.stats_file else (
+        Path(project_root) / 'data' / _STATS_DIR[args.scene_dataset] / 'analysis' / 'soundspaces_scene_stats.txt')
     return args
 
 
