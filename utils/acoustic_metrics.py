@@ -18,7 +18,7 @@ from scipy.stats import linregress
 from typing import Dict, List, Tuple, Optional, Union
 import warnings
 
-DEFAULT_T60_FIT_RANGE: Tuple[float, float] = (-5, -25)
+DEFAULT_T60_FIT_RANGE: Tuple[float, float] = (-15, -40)
 DEFAULT_OCTAVE_BANDS: List[float] = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0]
 
 

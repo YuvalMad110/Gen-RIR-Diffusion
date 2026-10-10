@@ -42,7 +42,7 @@
     "image_root":         "/dsi/fetaya-lab/yuvalmad/datasets/Matterport3D/rendered_images",
     "max_pairs_per_room": 1000,
     "balance_split_by":   "rooms",
-    "t60_fit_range":      [-5, -25],
+    "t60_fit_range":      [-15, -40],
     "sr_target":          16000,
     "sample_max_sec":     0.6,
     "n_fft":              256,
