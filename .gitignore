@@ -5,6 +5,10 @@ outputs/
 data/replica/
 data/matterport3d/
 
+# ── Dataset backups — the manifest is tracked, the archives are not ──────────
+data/backups/*
+!data/backups/MANIFEST.md
+
 # ── Large binary / media files ────────────────────────────────────────────────
 *.wav
 *.jpg
