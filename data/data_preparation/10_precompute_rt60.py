@@ -28,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 import torchaudio
 from tqdm import tqdm
 
@@ -36,6 +37,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from utils.acoustic_metrics import compute_t60
+from utils.signal_proc import apply_rir_scaling, decay_rate_from_t60, waveform_to_spectrogram
 from data.soundspaces import DATASET_DEFAULTS, _room_keys, _subsample_rooms
 from scene_stats import merge_notes, write_scene_stats
 
@@ -74,6 +76,14 @@ def parse_args():
                         help='Seed the per-room cap draws from; must match the training seed')
     parser.add_argument('--fit-range', type=fit_range, default=None,
                         help="dB range the decay line is fitted over, as --fit-range=-15,-40 (default: the dataset's t60_fit_range). The equals sign is required, since a leading minus otherwise reads as another flag")
+    parser.add_argument('--sr-target', type=int, default=None,
+                        help="Resample before measuring scaled_peak (default: the dataset's sr_target)")
+    parser.add_argument('--sample-max-sec', type=float, default=None,
+                        help="Length training crops and pads every RIR to (default: the dataset's)")
+    parser.add_argument('--n-fft', type=int, default=None,
+                        help="FFT size scaled_peak is measured over (default: the dataset's)")
+    parser.add_argument('--hop-length', type=int, default=None,
+                        help="Hop length scaled_peak is measured over (default: the dataset's)")
     parser.add_argument('--force', action='store_true',
                         help='Recompute and overwrite existing rt60 column')
     args = parser.parse_args()
@@ -85,6 +95,9 @@ def parse_args():
     # The config is the declared window for this dataset; it travels into run_config.json
     # from there, so overriding it here without updating it leaves the two disagreeing.
     args.fit_range    = args.fit_range or tuple(d['t60_fit_range'])
+    for name in ('sr_target', 'sample_max_sec', 'n_fft', 'hop_length'):
+        if getattr(args, name) is None:
+            setattr(args, name, d[name])
     args.stats_file  = (Path(project_root) / 'data' / _STATS_DIR[args.scene_dataset]
                         / 'analysis' / 'soundspaces_scene_stats.txt')
     return args
@@ -99,13 +112,35 @@ def region_counts(geometry_csv: str) -> dict:
     return g.groupby('scene').size().to_dict()
 
 
+def scaled_peak(rir, sr, t60, args):
+    """
+    The largest spectrogram value this RIR reaches once training has scaled it.
+
+    Half precision holds nothing above 65,504, and the model's forward pass casts the
+    spectrogram to it, so a value past that turns the loss to NaN and ends the run. The
+    signal is built exactly as the dataset builds it — resampled, then cropped and padded
+    to sample_max_sec — because the scaling grows the late samples most and how many of
+    those survive the crop is what decides the peak.
+    """
+    if sr != args.sr_target:
+        rir = torchaudio.transforms.Resample(sr, args.sr_target)(rir)
+    length = int(args.sr_target * args.sample_max_sec)
+    rir    = torch.nn.functional.pad(rir, (0, max(0, length - rir.shape[-1])))[:, :length]
+
+    k      = torch.tensor([decay_rate_from_t60(t60)], dtype=torch.float32)
+    scaled = apply_rir_scaling(rir, k, args.sr_target)
+    spec   = waveform_to_spectrogram(scaled, hop_length=args.hop_length, n_fft=args.n_fft)
+    return float(spec.abs().max())
+
+
 def main():
     args = parse_args()
 
     mapping = pd.read_csv(args.mapping_csv, comment='#')
 
-    if 'rt60' in mapping.columns and not args.force:
-        print(f"'rt60' column already exists in {args.mapping_csv}. Nothing to do.")
+    present = [c for c in ('rt60', 'scaled_peak') if c in mapping.columns]
+    if present and not args.force:
+        print(f"{', '.join(present)} already present in {args.mapping_csv}. Nothing to do.")
         print("Pass --force to recompute and overwrite.")
         return
 
@@ -126,6 +161,7 @@ def main():
         print(f"  --capped-only: narrowed to {len(valid_rows):,} rows at cap={cap}, seed={args.random_seed}.")
 
     rt60_series = pd.Series(np.nan, index=mapping.index, dtype=float)
+    peak_series = pd.Series(np.nan, index=mapping.index, dtype=float)
     n_nan = 0
 
     for idx, row in tqdm(valid_rows.iterrows(), total=len(valid_rows), desc="Computing RT60"):
@@ -142,22 +178,32 @@ def main():
             continue
 
         rt60_series[idx] = t60
+        peak_series[idx] = scaled_peak(waveform[channel:channel + 1], sr, t60, args)
 
-    mapping['rt60'] = rt60_series
+    mapping['rt60']        = rt60_series
+    mapping['scaled_peak'] = peak_series
 
     # Write mapping CSV, keeping the comment header and recording how rt60 was produced.
     # The fit range is the one setting that cannot be recovered from the column itself,
     # and it is the one most likely to change, so it belongs beside the values.
     hi, lo = args.fit_range
-    note = (f'# rt60: reverberation time in seconds. Least-squares fit over the {hi:g}..{lo:g} dB\n'
-            f'#       range of the energy decay curve, extrapolated to -60 dB. Measured on the\n'
-            f'#       whole recording at its native sample rate, with no sample_max_sec crop.')
+    notes = [
+        f'# rt60: reverberation time in seconds. Least-squares fit over the {hi:g}..{lo:g} dB\n'
+        f'#       range of the energy decay curve, extrapolated to -60 dB. Measured on the\n'
+        f'#       whole recording at its native sample rate, with no sample_max_sec crop.',
+
+        f'# scaled_peak: largest spectrogram value after scaling by exp(k*t), k = 3*ln(10)/rt60.\n'
+        f'#       Anything above 65504 overflows half precision and ends a run with a NaN loss.\n'
+        f'#       Measured as training sees it, so it is only valid for these settings:\n'
+        f'#       sr_target {args.sr_target}, sample_max_sec {args.sample_max_sec}, '
+        f'n_fft {args.n_fft}, hop_length {args.hop_length}.',
+    ]
 
     with open(args.mapping_csv, 'r') as f:
         comment_lines = [l for l in f if l.startswith('#')]
 
     with open(args.mapping_csv, 'w') as f:
-        f.writelines(merge_notes(comment_lines, [note]))
+        f.writelines(merge_notes(comment_lines, notes))
         f.write(mapping.to_csv(index=False))
 
     n_ok = len(valid_rows) - n_nan

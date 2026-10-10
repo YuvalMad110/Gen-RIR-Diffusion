@@ -329,6 +329,7 @@ class SoundSpacesDataset(Dataset):
 # Which script produces each column a filter needs, so a missing one says where to get it.
 _COLUMN_SOURCE = {
     'rt60':               '10_precompute_rt60.py',
+    'scaled_peak':        '10_precompute_rt60.py',
     'void_frac':          '05d_void_log.py',
     'outdoor':            '03_compute_mp3d_geometry.py',
     'mean_overview_void': '05d_void_log.py',
@@ -353,16 +354,29 @@ def _room_lookup(mapping, geometry, scene_dataset, column):
 
 def _apply_quality_filters(mapping, thresholds, scene_dataset, geometry_csv):
     """
-    Drop pairs the conditioning cannot describe: an RT60 too short to be a room, a view
-    into empty space, or a room the scanner never properly covered. Each threshold runs
-    only when it is set, so a dataset without these measurements is untouched.
+    Drop pairs the conditioning cannot describe, or that training cannot survive:
+
+        min_rt60          an RT60 too short to be a room
+        max_scaled_peak   an RIR that overflows half precision once scaled, ending the run
+        max_void_indoor   an enclosed room's pair view that is mostly empty space
+        max_void_outdoor  the same for a room open to the sky, which renders emptier
+        max_room_void     a room whose overview images are mostly empty space
+
+    Each threshold runs only when it is set, so a dataset without these measurements is
+    untouched.
     """
     if all(v is None for v in thresholds.values()):
         return mapping
 
+    # Rooms too dry to be rooms
     if thresholds['min_rt60'] is not None:
         _require(mapping, 'rt60', 'min_rt60')
         mapping = mapping[mapping['rt60'] >= thresholds['min_rt60']]
+
+    # RIRs whose scaled spectrogram exceeds what half precision holds
+    if thresholds['max_scaled_peak'] is not None:
+        _require(mapping, 'scaled_peak', 'max_scaled_peak')
+        mapping = mapping[mapping['scaled_peak'] <= thresholds['max_scaled_peak']]
 
     indoor_v  = thresholds['max_void_indoor']
     outdoor_v = thresholds['max_void_outdoor']
@@ -372,6 +386,7 @@ def _apply_quality_filters(mapping, thresholds, scene_dataset, geometry_csv):
 
     geometry = pd.read_csv(geometry_csv, comment='#')
 
+    # Pair views that are mostly empty space, at the threshold their room type earns
     if indoor_v is not None or outdoor_v is not None:
         _require(mapping, 'void_frac', 'max_void_indoor/max_void_outdoor')
         _require(geometry, 'outdoor', 'max_void_indoor/max_void_outdoor')
@@ -380,6 +395,7 @@ def _apply_quality_filters(mapping, thresholds, scene_dataset, geometry_csv):
                                     1.0 if indoor_v  is None else indoor_v)
         mapping = mapping[mapping['void_frac'].fillna(0.0).values <= limit]
 
+    # Rooms whose overviews give the model nothing to condition on
     if room_void is not None:
         _require(geometry, 'mean_overview_void', 'max_room_void')
         _require(geometry, 'outdoor', 'max_room_void')
@@ -403,6 +419,7 @@ def create_soundspaces_datasets(scene_dataset='matterport3d',
                                 max_pairs_per_room='auto',
                                 balance_split_by='auto',
                                 min_rt60='auto',
+                                max_scaled_peak='auto',
                                 max_void_indoor='auto',
                                 max_void_outdoor='auto',
                                 max_room_void='auto',
@@ -429,14 +446,12 @@ def create_soundspaces_datasets(scene_dataset='matterport3d',
         balance_split_by:   'auto' takes the dataset's value, 'rirs' holds the sample
                             ratios exactly, 'rooms' holds the room ratios and lets the
                             sample ratios land within a few points.
-        min_rt60:           drop pairs whose RT60 falls below this, in seconds. Values of
-                            a few milliseconds are estimation failures rather than rooms.
+        min_rt60:           drop pairs whose RT60 falls below this, in seconds. A few milliseconds is an estimation failure rather than a room.
+        max_scaled_peak:    drop pairs whose scaled spectrogram peaks above this. Half precision holds nothing past 65,504, and one such sample turns the loss to NaN and ends the run.
         max_void_indoor:    drop pairs whose own view is emptier than this, for rooms that
-        max_void_outdoor:   are enclosed and open-to-sky respectively. Outdoor void is
-                            mostly sky, which matches the RIR, so it tolerates far more.
-        max_room_void:      drop enclosed rooms whose four overviews average emptier than
-                            this, which marks a room the scanner never properly covered.
-                            Each of these four runs only when it is not None.
+        max_void_outdoor:   are enclosed and open-to-sky respectively. Outdoor void is mostly sky, which matches the RIR, so it tolerates far more.
+        max_room_void:      drop enclosed rooms whose four overviews average emptier than this, which marks a room the scanner never properly covered.
+                            Each of these five runs only when it is not None.
         split:              if True, returns (train_ds, eval_ds, test_ds); else one dataset
 
     Returns:
@@ -453,7 +468,7 @@ def create_soundspaces_datasets(scene_dataset='matterport3d',
     if balance_split_by == 'auto':
         balance_split_by = d['balance_split_by']
     thresholds = {k: (d[k] if v == 'auto' else v) for k, v in
-                  (('min_rt60', min_rt60), ('max_void_indoor', max_void_indoor),
+                  (('min_rt60', min_rt60), ('max_scaled_peak', max_scaled_peak), ('max_void_indoor', max_void_indoor),
                    ('max_void_outdoor', max_void_outdoor), ('max_room_void', max_room_void))}
 
     # Replica picks overview corners per scene from a JSON map; Matterport3D uses the

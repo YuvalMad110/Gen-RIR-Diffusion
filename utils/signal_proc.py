@@ -307,6 +307,19 @@ def undo_rir_scaling(scaled_rir: torch.Tensor, k: torch.Tensor, sr: float) -> to
     inverse_scaling_factor = torch.exp(-k.unsqueeze(-1) * t_full.unsqueeze(0))
     return scaled_rir * inverse_scaling_factor
 
+def decay_rate_from_t60(t60):
+    """
+    The decay rate k for a reverberation time in seconds, used as:
+
+        scaled = rir * exp(k * t)          flattens the decay, via apply_rir_scaling
+        rir    = scaled * exp(-k * t)      puts it back, via undo_rir_scaling
+
+    T60 is the time to fall 60 dB, so the energy decays as 10^(-6t/T60) and the amplitude as
+    its square root, giving an amplitude rate of 3*ln(10)/T60. Accepts a scalar or an array.
+    """
+    return (3.0 * np.log(10.0)) / t60
+
+
 def scale_rir(rir: torch.Tensor, sr: float, db_cutoff: float = -40.0, apply_zero_tail: bool = False) -> torch.Tensor:
     """
     Scale RIR by estimating and compensating for natural decay.

@@ -45,13 +45,11 @@ def parse_args():
 
     # Dataset selection
     parser.add_argument('--scene-dataset', type=str, default='matterport3d',
-                        choices=['replica', 'matterport3d'],
-                        help='Scene dataset the SoundSpaces RIRs were simulated in')
+                        choices=['replica', 'matterport3d'], help='Scene dataset the SoundSpaces RIRs were simulated in')
     parser.add_argument('--data-path', type=str, default=None,
                         help='SoundSpaces RIR root directory (default: per scene dataset)')
     parser.add_argument('--image-root', type=str, default=None,
-                        help='Rendered-images root (default: per scene dataset); '
-                             'set --rir-view-type and --room-overview-type to none to disable images')
+                        help="Rendered-images root (default: the dataset's); set --rir-view-type and --room-overview-type to none to disable images")
     parser.add_argument('--rir-view-type', type=str, default='rgb', choices=['rgb', 'depth', 'none'],
                         help="Per-pair image type: 'rgb', 'depth', or 'none' to disable")
     parser.add_argument('--room-overview-type', type=str, default='rgb', choices=['rgb', 'depth', 'none'],
@@ -74,18 +72,20 @@ def parse_args():
     parser.add_argument('--eval-freq', type=int, default=1, help='Evaluate every N epochs')
     parser.add_argument('--use-eval', type=str2bool, default=True, help='Use evaluation dataset during training')
 
-    # Audio / spectrogram
-    parser.add_argument('--sample-max-sec', type=float, default=0.6, help='Max RIR length in seconds')
+    # Audio / spectrogram — all four default to the scene dataset's values
+    parser.add_argument('--sr-target', type=int, default=None, help='Target sampling rate')
+    parser.add_argument('--sample-max-sec', type=float, default=None, help='Max RIR length in seconds')
+    parser.add_argument('--n-fft', type=int, default=None)
+    parser.add_argument('--hop-length', type=int, default=None)
+
     parser.add_argument('--nSamples', type=int, default=None, help='Cap dataset size (None = all)')
 
     # Quality filters: 'auto' takes the scene dataset's value, 'none' switches one off
     parser.add_argument('--min-rt60', type=filter_threshold, default='auto', help='Drop pairs whose RT60 is below this, in seconds')
+    parser.add_argument('--max-scaled-peak', type=filter_threshold, default='auto', help='Drop pairs whose scaled spectrogram peaks above this; 65504 is the half-precision ceiling')
     parser.add_argument('--max-void-indoor', type=filter_threshold, default='auto', help='Drop pairs in enclosed rooms whose own view is emptier than this')
     parser.add_argument('--max-void-outdoor', type=filter_threshold, default='auto', help='Drop pairs in open-to-sky rooms whose own view is emptier than this')
     parser.add_argument('--max-room-void', type=filter_threshold, default='auto', help='Drop enclosed rooms whose four overviews average emptier than this')
-    parser.add_argument('--hop-length', type=int, default=64)
-    parser.add_argument('--n-fft', type=int, default=256)
-    parser.add_argument('--sr-target', type=int, default=22050, help='Target sampling rate')
     parser.add_argument('--scale-rir', type=str2bool, default=True)
     parser.add_argument('--apply-zero-tail', type=str2bool, default=False, help='Zero RIR values after -40 dB (requires --scale-rir)')
     parser.add_argument('--db-cutoff', type=float, default=-40.0, help='dB threshold for EDC-based RIR scaling and tail zeroing')
@@ -111,7 +111,10 @@ def parse_args():
     args.geometry_csv       = d['geometry_csv']
     args.max_pairs_per_room = d['max_pairs_per_room']
     args.balance_split_by   = d['balance_split_by']
-    for name in ('min_rt60', 'max_void_indoor', 'max_void_outdoor', 'max_room_void'):
+    for name in ('sr_target', 'sample_max_sec', 'n_fft', 'hop_length'):
+        if getattr(args, name) is None:
+            setattr(args, name, d[name])
+    for name in ('min_rt60', 'max_scaled_peak', 'max_void_indoor', 'max_void_outdoor', 'max_room_void'):
         if getattr(args, name) == 'auto':
             setattr(args, name, d[name])
     return args
@@ -235,7 +238,7 @@ def main():
         scene_dataset=args.scene_dataset, rir_root=args.data_path, image_root=args.image_root,
         mapping_csv=args.mapping_csv, geometry_csv=args.geometry_csv,
         max_pairs_per_room=args.max_pairs_per_room, balance_split_by=args.balance_split_by,
-        min_rt60=args.min_rt60, max_void_indoor=args.max_void_indoor,
+        min_rt60=args.min_rt60, max_scaled_peak=args.max_scaled_peak, max_void_indoor=args.max_void_indoor,
         max_void_outdoor=args.max_void_outdoor, max_room_void=args.max_room_void,
         rir_view_type=rir_view_type, image_size=image_size,
         room_overview_type=room_overview_type,
