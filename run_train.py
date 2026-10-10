@@ -317,7 +317,7 @@ def main():
     if accelerator.is_main_process:
         configs_dir = os.path.join(model_path, 'configs')
 
-        save_run_config(model_path, args, model.config, ie_config, git_hash, train_dataset, started_at)
+        save_run_config(model_path, args, model.config, ie_config, git_hash, train_dataset, started_at, DATASET_DEFAULTS[args.scene_dataset])
         save_split_identities(model_path, (train_dataset, eval_dataset, test_dataset))
 
         with open(os.path.join(configs_dir, 'model_config.json'), 'w') as f:

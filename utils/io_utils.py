@@ -101,6 +101,7 @@ def save_config_summary(config: Dict, data_params: Dict, args: Any, save_path: s
 
 
 _SPLIT_ID_COLUMNS = ['scene', 'receiver_region', 'receiver_idx', 'source_idx']
+_HEADER_BYTES     = 64 << 10   # far past any CSV comment header, and avoids decoding a multi-GB read
 
 
 def save_split_identities(run_dir: str, datasets, names=('train', 'eval', 'test')) -> Path:
@@ -121,13 +122,30 @@ def save_split_identities(run_dir: str, datasets, names=('train', 'eval', 'test'
     return out_path
 
 
+def _comment_header(chunk: bytes) -> list:
+    """The leading '#' lines of a CSV, where the preparation scripts record how they built each column."""
+    out = []
+    for line in chunk[:_HEADER_BYTES].decode('utf-8', errors='replace').splitlines():
+        if not line.startswith('#'):
+            break
+        out.append(line)
+    return out
+
+
 def _fingerprint(path: Optional[str], started_at: datetime) -> Optional[Dict]:
-    """Identify an input file, and flag it when it was written after the run began."""
+    """
+    Identify an input file, and flag it when it was written after the run began.
+
+    The comment header is kept alongside the digest: it states the settings each column was
+    produced with, which cannot be recovered from the values themselves.
+    """
     if not path or not os.path.exists(path):
         return None
-    digest, lines = hashlib.md5(), 0
+    digest, lines, header = hashlib.md5(), 0, None
     with open(path, 'rb') as f:
         for chunk in iter(lambda: f.read(1 << 22), b''):
+            if header is None:
+                header = _comment_header(chunk)
             digest.update(chunk)
             lines += chunk.count(b'\n')
     stat = os.stat(path)
@@ -138,12 +156,53 @@ def _fingerprint(path: Optional[str], started_at: datetime) -> Optional[Dict]:
         'lines':       lines,
         'modified':    datetime.fromtimestamp(stat.st_mtime).isoformat(timespec='seconds'),
         'modified_during_run': stat.st_mtime > started_at.timestamp(),
+        'header':      header or [],
     }
 
 
-def save_run_config(run_dir: str, args, model_config: Dict, ie_config: Optional[Dict],
-                    git_hash: str, dataset=None, started_at: Optional[datetime] = None) -> None:
-    """Save all training settings as a single human-readable JSON for reproducibility."""
+def describe_input_drift(fingerprint: Optional[Dict]) -> Optional[str]:
+    """
+    Compare a fingerprint recorded at training time against the file as it stands now, and
+    return a message describing the difference, or None when they match.
+
+    Size and modification time are checked first, so the digest of a multi-GB mapping is
+    only recomputed once something already looks different.
+    """
+    if not fingerprint:
+        return None
+    path = fingerprint.get('path')
+    if not path or not os.path.exists(path):
+        return f"{path} was recorded at training time but is not on disk now"
+    if fingerprint.get('modified_during_run'):
+        return (f"{path} was rewritten while that run was training. The fingerprint is taken when a run "
+                f"ends, so the md5 recorded for it describes the file afterwards rather than the one the "
+                f"run read, and what this model trained on cannot be established from the run config.")
+
+    stat = os.stat(path)
+    modified = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec='seconds')
+    if stat.st_size == fingerprint.get('size_bytes') and modified == fingerprint.get('modified'):
+        return None
+
+    digest = hashlib.md5()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 22), b''):
+            digest.update(chunk)
+    if digest.hexdigest() == fingerprint.get('md5'):
+        return None
+    return (f"{path} has changed since this model was trained: md5 {fingerprint.get('md5')} "
+            f"-> {digest.hexdigest()}, {fingerprint.get('lines'):,} lines -> {stat.st_size:,} bytes. "
+            f"The split and the conditioning values this evaluation serves may not be the ones it saw.")
+
+
+def save_run_config(run_dir: str, args, model_config: Dict, ie_config: Optional[Dict], git_hash: str,
+                    dataset=None, started_at: Optional[datetime] = None, dataset_defaults: Optional[Dict] = None) -> None:
+    """
+    Save all training settings as a single human-readable JSON for reproducibility.
+
+    'args' holds what this run chose, 'dataset_defaults' the resolved entry describing the
+    scene dataset itself; both are recorded so a command-line override stands out against
+    the declared value it replaced.
+    """
     import socket
 
     def _to_json(obj):
@@ -160,6 +219,7 @@ def save_run_config(run_dir: str, args, model_config: Dict, ie_config: Optional[
         "git_hash": git_hash,
         "host": socket.gethostname(),
         "args": saved_args,
+        "dataset_defaults": dataset_defaults,
         "model_config": model_config,
         "image_encoder_config": ie_config,
     }

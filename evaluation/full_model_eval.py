@@ -33,8 +33,9 @@ from utils.inference_data_loading import (
     build_test_dataloader, _normalize_batch_to_dict,
 )
 from utils.dataset_utils import build_condition_tensor
-from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_t60_batch, DEFAULT_T60_FIT_RANGE, DEFAULT_OCTAVE_BANDS
+from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_t60_batch, DEFAULT_OCTAVE_BANDS
 from utils.misc import get_israel_time, get_full_path
+from utils.io_utils import describe_input_drift
 from utils.evaluation import select_representative_samples
 from utils.evaluation_reporting import save_evaluation_summary, save_detailed_metrics_table, save_selected_samples, save_reverb_speech
 from utils.visualization import (
@@ -178,6 +179,23 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, src_trgt_
 # Main
 # =============================================================================
 
+def check_training_inputs(run_config):
+    """
+    Compare the data files this model was trained on against the ones on disk now, printing
+    anything that differs and returning the same messages for the evaluation summary.
+    """
+    inputs = run_config.get('inputs') or {}
+    if not inputs:
+        warnings = ["This run predates input fingerprinting, so the data behind it cannot be checked "
+                    "against the files on disk now."]
+    else:
+        warnings = [w for w in (describe_input_drift(inputs.get(name))
+                                for name in ('mapping_csv', 'geometry_csv')) if w]
+    for warning in warnings:
+        print(f"\n  !! {warning}")
+    return warnings
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate RIR Diffusion Model on Test Set")
     parser.add_argument("--model_dir", type=str,
@@ -198,8 +216,8 @@ def parse_args():
                         help="Path to clean speech for reverbed LSD computation")
     parser.add_argument("--baseline_method", type=str, default='none', choices=['habets', 'pra', 'none'],
                         help="Synthetic RIR baseline method (habets is preferred over pra)")
-    parser.add_argument("--t60_fit_range", type=float, nargs=2, default=list(DEFAULT_T60_FIT_RANGE),
-                        help="dB window for RT60 EDC slope fit: upper lower (e.g. -5 -35)")
+    parser.add_argument("--t60_fit_range", type=float, nargs=2, default=None,
+                        help="dB window for RT60 EDC slope fit: upper lower (e.g. -5 -35). Defaults to the window the model's rt60 column was fitted over")
     return parser.parse_args()
 
 
@@ -220,6 +238,8 @@ def main():
         "use_rt60_condition must be True — save_detailed_metrics_table reads cond[9] (RT60). Fix the run_config or update the table."
     src_trgt_dist_cond = run_config['model_config']['src_trgt_dist_cond']
     args.num_inference_steps = args.num_inference_steps or model.n_timesteps
+    args.t60_fit_range = args.t60_fit_range or data_info['t60_fit_range']
+    input_warnings = check_training_inputs(run_config)
     args.model_path = str(model_dir / 'model_best.pth.tar')  # for summary reporting
 
     # ---------- Load clean speech for reverbed LSD ----------
@@ -289,6 +309,7 @@ def main():
         baseline_method=args.baseline_method if use_baseline else None,
         all_metrics=all_metrics if use_baseline else None,
         t60_fit_range=args.t60_fit_range,
+        input_warnings=input_warnings,
     )
     save_detailed_metrics_table(all_metrics, all_samples, save_path / 'detailed_metrics.csv')
     save_selected_samples(selected_samples, data_info, save_path)

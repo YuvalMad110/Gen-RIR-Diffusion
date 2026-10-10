@@ -101,6 +101,7 @@ def data_params_from_run_config(run_config: Dict) -> Dict:
         'random_seed':         a.get('random_seed', 42),
         'scene_dataset':       a['scene_dataset'],
         'use_rt60_condition':  a['use_rt60_condition'],
+        't60_fit_range':       run_config['dataset_defaults']['t60_fit_range'],
     }
 
 
