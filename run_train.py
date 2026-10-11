@@ -86,9 +86,9 @@ def parse_args():
     parser.add_argument('--max-void-indoor', type=filter_threshold, default='auto', help='Drop pairs in enclosed rooms whose own view is emptier than this')
     parser.add_argument('--max-void-outdoor', type=filter_threshold, default='auto', help='Drop pairs in open-to-sky rooms whose own view is emptier than this')
     parser.add_argument('--max-room-void', type=filter_threshold, default='auto', help='Drop enclosed rooms whose four overviews average emptier than this')
-    parser.add_argument('--scale-rir', type=str2bool, default=True)
-    parser.add_argument('--apply-zero-tail', type=str2bool, default=False, help='Zero RIR values after -40 dB (requires --scale-rir)')
-    parser.add_argument('--db-cutoff', type=float, default=-40.0, help='dB threshold for EDC-based RIR scaling and tail zeroing')
+    parser.add_argument('--scale-rir', type=str2bool, default=True, help='Flatten each RIR\'s decay at the rate its stored rt60 implies (requires --use-rt60-condition)')
+    parser.add_argument('--apply-zero-tail', type=str2bool, default=False, help='Zero RIR values after the db-cutoff point')
+    parser.add_argument('--db-cutoff', type=float, default=-40.0, help='dB level the zero-tail cutoff point is read at')
 
     # Data split
     parser.add_argument('--train-ratio', type=float, default=0.7)
@@ -117,6 +117,9 @@ def parse_args():
     for name in ('min_rt60', 'max_scaled_peak', 'max_void_indoor', 'max_void_outdoor', 'max_room_void'):
         if getattr(args, name) == 'auto':
             setattr(args, name, d[name])
+
+    if args.scale_rir and not args.use_rt60_condition:
+        parser.error('--scale-rir takes its decay rate from the stored rt60, so it requires --use-rt60-condition.')
     return args
 
 def load_model_config(config_path, use_rt60_condition=False):

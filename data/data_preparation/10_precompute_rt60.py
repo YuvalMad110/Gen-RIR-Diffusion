@@ -37,7 +37,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from utils.acoustic_metrics import compute_t60
-from utils.signal_proc import apply_rir_scaling, decay_rate_from_t60, waveform_to_spectrogram
+from utils.signal_proc import scale_rir, waveform_to_spectrogram
 from data.soundspaces import DATASET_DEFAULTS, _room_keys, _subsample_rooms
 from scene_stats import merge_notes, write_scene_stats
 
@@ -129,8 +129,7 @@ def scaled_peak(rir, sr, t60, args):
     length = int(args.sr_target * args.sample_max_sec)
     rir    = torch.nn.functional.pad(rir, (0, max(0, length - rir.shape[-1])))[:, :length]
 
-    k      = torch.tensor([decay_rate_from_t60(t60)], dtype=torch.float32)
-    scaled = apply_rir_scaling(rir, k, args.sr_target)
+    scaled = scale_rir(rir, args.sr_target, t60)
     spec   = waveform_to_spectrogram(scaled, hop_length=args.hop_length, n_fft=args.n_fft)
     return float(spec.abs().max())
 

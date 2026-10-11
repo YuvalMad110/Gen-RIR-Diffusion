@@ -271,83 +271,125 @@ def estimate_decay_k_factor(edc: torch.Tensor, sr: float, db_cutoff: float = -40
     
     return torch.stack(k_values), crop_indices
 
-def apply_rir_scaling(rir: torch.Tensor, k: torch.Tensor, sr: float) -> torch.Tensor:
+def _exp_envelope(k: torch.Tensor, n_samples: int, sr: float) -> torch.Tensor:
     """
-    Apply exponential scaling to RIR using provided k factors.
-    
     Args:
-        rir: Time-domain RIR tensor [batch, time]
-        k: Decay rate factors [batch]
-        sr: Sample rate
-    
-    Returns:
-        Scaled RIR tensor
-    """
-    rir_seq_len = rir.shape[-1]
-    t_full = torch.arange(rir_seq_len, dtype=torch.float32, device=rir.device) / sr
-    scaling_factor = torch.exp(k.unsqueeze(-1) * t_full.unsqueeze(0))
-    
-    return rir * scaling_factor
+        k:         Decay rate per RIR [batch]
+        n_samples: Length of the time grid
+        sr:        Sample rate
 
-def undo_rir_scaling(scaled_rir: torch.Tensor, k: torch.Tensor, sr: float) -> torch.Tensor:
-    """
-    Undo exponential scaling from RIR using provided k factors.
-    
-    Args:
-        scaled_rir: Scaled time-domain RIR tensor [batch, time]
-        k: Decay rate factors used for original scaling [batch]
-        sr: Sample rate
-    
     Returns:
-        Unscaled RIR tensor
+        exp(k*t) over t = [0, 1/sr, ..., (n_samples-1)/sr], shape [batch, n_samples]
     """
-    rir_seq_len = scaled_rir.shape[-1]
-    t_full = torch.arange(rir_seq_len, dtype=torch.float32, device=scaled_rir.device) / sr
-    # Inverse scaling: divide by the scaling factor (or multiply by its inverse)
-    inverse_scaling_factor = torch.exp(-k.unsqueeze(-1) * t_full.unsqueeze(0))
-    return scaled_rir * inverse_scaling_factor
+    t = torch.arange(n_samples, dtype=torch.float32, device=k.device) / sr
+    return torch.exp(k.unsqueeze(-1) * t.unsqueeze(0))
+
+
+def _k_tensor(rt60, device: torch.device) -> torch.Tensor:
+    """
+    Args:
+        rt60:   Reverberation time per RIR, in seconds; scalar or sequence
+        device: Device the result should live on
+
+    Returns:
+        decay_rate_from_t60(rt60) as a float32 tensor of shape [batch]
+    """
+    return torch.as_tensor(decay_rate_from_t60(rt60), dtype=torch.float32,
+                           device=device).reshape(-1)
+
 
 def decay_rate_from_t60(t60):
     """
-    The decay rate k for a reverberation time in seconds, used as:
+    The decay rate used as:
 
-        scaled = rir * exp(k * t)          flattens the decay, via apply_rir_scaling
-        rir    = scaled * exp(-k * t)      puts it back, via undo_rir_scaling
+        scaled = rir * exp(k * t)          flattens the decay, via scale_rir
+        rir    = scaled * exp(-k * t)      puts it back, via unscale_rir
 
     T60 is the time to fall 60 dB, so the energy decays as 10^(-6t/T60) and the amplitude as
-    its square root, giving an amplitude rate of 3*ln(10)/T60. Accepts a scalar or an array.
+    its square root, giving an amplitude rate of 3*ln(10)/T60.
+
+    Args:
+        t60: Reverberation time in seconds; scalar or array
+
+    Returns:
+        k, matching the shape of t60
     """
     return (3.0 * np.log(10.0)) / t60
 
 
-def scale_rir(rir: torch.Tensor, sr: float, db_cutoff: float = -40.0, apply_zero_tail: bool = False) -> torch.Tensor:
+def scale_rir(rir: torch.Tensor, sr: float, rt60) -> torch.Tensor:
     """
-    Scale RIR by estimating and compensating for natural decay.
-    
+    Flatten each RIR's exponential decay. The rate k comes straight from rt60.
+
     Args:
-        rir: Time-domain RIR tensor [batch, time]
-        sr: Sample rate
-        db_cutoff: dB cutoff for EDC cropping
-        apply_zero_tail: Whether to zero out signal after db_cutoff point
-    
+        rir:   Time-domain RIR tensor [batch, time]
+        sr:    Sample rate
+        rt60:  Reverberation time per RIR, in seconds [batch]
+
     Returns:
-        Scaled RIR tensor
+        rir * exp(k*t), shape [batch, time]
     """
-    # Calculate EDC
-    edc = calculate_edc(rir)
-    
-    # Estimate decay rate k and get crop indices
-    k, crop_indices = estimate_decay_k_factor(edc, sr, db_cutoff)
-    
-    # Apply scaling
-    scaled_rir = apply_rir_scaling(rir, k, sr)
-    
-    # Apply zero tail if requested
-    if apply_zero_tail:
-        for i, crop_idx in enumerate(crop_indices):
-            scaled_rir[i, crop_idx:] = 0.0
-    
-    return scaled_rir
+    return rir * _exp_envelope(_k_tensor(rt60, rir.device), rir.shape[-1], sr)
+
+
+def unscale_rir(scaled_rir: torch.Tensor, sr: float, rt60) -> torch.Tensor:
+    """
+    Restore an RIR that scale_rir flattened. The rate k comes straight from rt60, so the
+    same value that scaled it recovers it.
+
+    Args:
+        scaled_rir: Scaled time-domain RIR tensor [batch, time]
+        sr:         Sample rate
+        rt60:       Reverberation time per RIR, in seconds [batch]
+
+    Returns:
+        scaled_rir * exp(-k*t), shape [batch, time]
+    """
+    return scaled_rir * _exp_envelope(-_k_tensor(rt60, scaled_rir.device), scaled_rir.shape[-1], sr)
+
+
+def unscale_rir_from_reference(scaled_rir: torch.Tensor, reference: torch.Tensor,
+                               sr: float, db_cutoff: float = -40.0) -> torch.Tensor:
+    """
+    Restore an RIR whose scaling rate was fitted to a reference RIR's decay curve rather
+    than taken from rt60.
+
+    The rate is recovered by refitting that reference, so the ground-truth RIR must be in
+    hand and any T60 measured from the result carries some of the reference's own decay.
+
+    Args:
+        scaled_rir: Scaled time-domain RIR tensor [batch, time]
+        reference:  Ground-truth RIRs the rate is fitted to [batch, time]
+        sr:         Sample rate
+        db_cutoff:  dB level the fit runs down to
+
+    Returns:
+        scaled_rir * exp(-k*t), shape [batch, time]
+    """
+    k, _ = estimate_decay_k_factor(calculate_edc(reference), sr, db_cutoff)
+    return scaled_rir * _exp_envelope(-k, scaled_rir.shape[-1], sr)
+
+
+def zero_tail(rir: torch.Tensor, sr: float, db_cutoff: float = -40.0) -> torch.Tensor:
+    """
+    Zero each RIR from the point its energy decay curve first falls below db_cutoff. An RIR
+    whose curve never reaches that level is returned unchanged.
+
+    Args:
+        rir:       Time-domain RIR tensor [batch, time]
+        sr:        Sample rate
+        db_cutoff: dB level past which the signal is zeroed
+
+    Returns:
+        RIR tensor with each tail zeroed, shape [batch, time]
+    """
+    edc_db = 10 * torch.log10(calculate_edc(rir) + 1e-12)
+    out    = rir.clone()
+    for i in range(rir.shape[0]):
+        below = torch.where(edc_db[i] < db_cutoff)[0]
+        if below.numel():
+            out[i, below[0].item():] = 0.0
+    return out
 
 # ------------------------------------------------------------------------
 #                       Signal Distance Metrics

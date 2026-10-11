@@ -1,6 +1,6 @@
 import torch
 from typing import List, Tuple
-from utils.signal_proc import waveform_to_spectrogram, scale_rir
+from utils.signal_proc import waveform_to_spectrogram, scale_rir, zero_tail
 
 
 def scale_and_spectrogram_collate_fn(sr: float,
@@ -30,23 +30,25 @@ def scale_and_spectrogram_collate_fn(sr: float,
 
     Args:
         sr:              sample rate of the RIRs
-        db_cutoff:       dB threshold for EDC-based RIR cropping
+        db_cutoff:       dB level the zero-tail cutoff point is read at
         n_fft:           FFT size for spectrogram
         hop_length:      hop length for spectrogram
-        scale_rir_flag:  whether to apply RIR scaling
+        scale_rir_flag:  whether to flatten each RIR's decay, at the rate its rt60 implies
         use_spectrogram: whether to convert to spectrogram
         apply_zero_tail: whether to zero the signal after the db_cutoff point
     """
 
-    def _process_rirs(rirs):
+    def _process_rirs(rirs, rt60s):
         # Stack mono RIRs [1, T] → [B, 1, T], then squeeze to [B, T] for processing
         batch_rirs = torch.stack(rirs).squeeze(1)  # [B, T]
 
-        # Optionally scale the RIRs
-        if scale_rir_flag:
-            batch_rirs = scale_rir(batch_rirs, sr, db_cutoff, apply_zero_tail)
+        # Zeroing runs first, so the cutoff point is read off the natural decay
+        if apply_zero_tail:
+            batch_rirs = zero_tail(batch_rirs, sr, db_cutoff)
 
-        # Optionally convert to spectrograms
+        if scale_rir_flag:
+            batch_rirs = scale_rir(batch_rirs, sr, rt60s)
+
         if use_spectrogram:
             batch_rirs = waveform_to_spectrogram(
                 waveform=batch_rirs, hop_length=hop_length, n_fft=n_fft)
@@ -71,13 +73,15 @@ def scale_and_spectrogram_collate_fn(sr: float,
             raise ValueError(
                 f"soundspaces_collate: expected 6 or 7 fields, got {len(batch[0])}."
             )
+        rt60 = torch.tensor(rt60s, dtype=torch.float32) if rt60s is not None else None
+
         d = {
-            'rir':   _process_rirs(rirs),
+            'rir':   _process_rirs(rirs, rt60),
             'scene': list(scenes),
             **_stack_locs(room_dims, mic_locs, speaker_locs),
         }
-        if rt60s is not None:
-            d['rt60'] = torch.tensor(rt60s, dtype=torch.float32)
+        if rt60 is not None:
+            d['rt60'] = rt60
         # Images may be None when image_root is not set or a file is missing
         if images[0] is not None:
             d['images'] = torch.stack(images)   # [B, N, 3, H, W]

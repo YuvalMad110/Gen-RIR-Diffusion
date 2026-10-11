@@ -36,7 +36,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from utils.signal_proc import spectrogram_to_waveform, undo_rir_scaling, calculate_edc, estimate_decay_k_factor
+from utils.signal_proc import spectrogram_to_waveform, unscale_rir_from_reference
 from utils.inference_data_loading import (
     load_pretrained_model, data_params_from_run_config,
     build_test_dataloader,
@@ -108,8 +108,8 @@ def run_inference_for_pair(
 ) -> np.ndarray:
     """Run DDIM inference for a single batch (B=1) and return the generated waveform.
 
-    Applies undo_rir_scaling when scale_rir is active, using k_factor derived from
-    the reference RIR in the batch.
+    When scale_rir is active the generated waveform is un-scaled with the decay rate
+    fitted to the reference RIR in the batch.
     """
     sr = data_info['sr_target']
     hop_length = data_info['hop_length']
@@ -146,11 +146,9 @@ def run_inference_for_pair(
         ref_np = rirs[0].cpu().numpy().squeeze() if torch.is_tensor(rirs[0]) else np.array(rirs[0]).squeeze()
 
         real_t = torch.tensor(ref_np, dtype=torch.float32).unsqueeze(0)
-        edc = calculate_edc(real_t)
-        k_factors, _ = estimate_decay_k_factor(edc, sr, data_info.get('db_cutoff', -40))
-
-        gen_t = torch.tensor(gen_wave, dtype=torch.float32).unsqueeze(0)
-        gen_wave = undo_rir_scaling(gen_t, k_factors, sr)[0].cpu().numpy()
+        gen_t  = torch.tensor(gen_wave, dtype=torch.float32).unsqueeze(0)
+        gen_wave = unscale_rir_from_reference(gen_t, real_t, sr,
+                                              data_info.get('db_cutoff', -40))[0].cpu().numpy()
 
     return gen_wave
 

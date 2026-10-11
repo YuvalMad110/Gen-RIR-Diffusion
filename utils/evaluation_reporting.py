@@ -140,7 +140,8 @@ def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_t
         baseline_all_metrics: Per-sample baseline metrics list (optional, for paired comparison)
         baseline_method: Baseline method name (optional)
         all_metrics: Per-sample diffusion metrics list (needed for paired comparison table)
-        input_warnings: Messages about the training data differing from the files on disk now
+        input_warnings: Messages qualifying how the metrics should be read, such as training data
+                        that no longer matches the files on disk
     """
     diff_all_metrics = all_metrics
 
@@ -150,9 +151,9 @@ def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_t
         f"Total samples evaluated: {n_samples}",
     ]
 
-    # Ahead of the numbers, since these say whether the data behind them is what the model was trained on
+    # Ahead of the numbers, since these qualify how the numbers should be read
     if input_warnings:
-        lines += ["", "!" * 70, "TRAINING INPUTS", "!" * 70]
+        lines += ["", "!" * 70, "READ THE METRICS WITH THESE IN MIND", "!" * 70]
         lines += [f"  !! {w}" for w in input_warnings]
 
     lines += ["", "-" * 70, "ACOUSTIC METRICS — Diffusion (Mean ± Std)", "-" * 70]

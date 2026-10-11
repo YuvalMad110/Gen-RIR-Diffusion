@@ -26,7 +26,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from RIRDiffusionModel import RIRDiffusionModel
-from utils.signal_proc import spectrogram_to_waveform, undo_rir_scaling, calculate_edc, estimate_decay_k_factor
+from utils.signal_proc import spectrogram_to_waveform, unscale_rir_from_reference
 from utils.inference_data_loading import load_model_and_data_info
 from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths
 from utils.misc import get_israel_time
@@ -274,10 +274,8 @@ def main():
         ref_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in synthetic_rirs])
         gen_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in diffusion_rirs])
 
-        edc = calculate_edc(ref_tensor)
-        k_factors, _ = estimate_decay_k_factor(edc, sr, data_info.get('db_cutoff', -40))
-
-        gen_unscaled = undo_rir_scaling(gen_tensor, k_factors, sr)
+        gen_unscaled = unscale_rir_from_reference(gen_tensor, ref_tensor, sr,
+                                                  data_info.get('db_cutoff', -40))
         diffusion_rirs = [g.cpu().numpy() for g in gen_unscaled]
 
     # ---------- Evaluate ----------

@@ -100,12 +100,7 @@ from utils.inference_data_loading import (
 )
 from utils.dataset_utils import build_condition_tensor
 from utils.misc import str2bool, get_full_path
-from utils.signal_proc import (
-    spectrogram_to_waveform,
-    undo_rir_scaling,
-    calculate_edc,
-    estimate_decay_k_factor,
-)
+from utils.signal_proc import spectrogram_to_waveform, unscale_rir_from_reference
 
 # --- Dereverberation model interface -----------------------------------------
 from dereverberation_models import build_dereverb_model, DEREVERB_SR, DereverbModel
@@ -317,27 +312,21 @@ def run_evaluation(model, data_info: dict, dereverb_model: DereverbModel, test_d
         # --- Optional image conditioning ----------------------------------------
         images = batch['images'].to(device) if 'images' in batch else None
 
-        # --- Compute k-factors for amplitude un-scaling (if used in training) ---
-        if scale_rir:
-            real_tensor = torch.stack(
-                [torch.tensor(w, dtype=torch.float32) for w in real_waves_native]
-            )
-            edc = calculate_edc(real_tensor)
-            k_factors, _ = estimate_decay_k_factor(edc, native_sr, data_info.get("db_cutoff", -40))
-        else:
-            k_factors = None
-
         # --- Generate RIRs conditioned on the same metadata as the real ones ----
         gen_waves_native = generate_rir_batch(model, conditions, data_info, device,
                                               guidance_scale, use_ddim, num_inference_steps,
                                               images=images)
 
         # --- Un-scale generated RIRs if amplitude scaling was used in training --
-        if scale_rir and k_factors is not None:
-            gen_tensor   = torch.stack(
+        if scale_rir:
+            real_tensor = torch.stack(
+                [torch.tensor(w, dtype=torch.float32) for w in real_waves_native]
+            )
+            gen_tensor = torch.stack(
                 [torch.tensor(w, dtype=torch.float32) for w in gen_waves_native]
             )
-            gen_unscaled = undo_rir_scaling(gen_tensor, k_factors, native_sr)
+            gen_unscaled = unscale_rir_from_reference(gen_tensor, real_tensor, native_sr,
+                                                      data_info.get("db_cutoff", -40))
             gen_waves_native = [g.cpu().numpy() for g in gen_unscaled]
 
         # --- Resample both RIR sets to 16 kHz for the dereverberation model ----

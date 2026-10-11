@@ -30,7 +30,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from utils.signal_proc import spectrogram_to_waveform, undo_rir_scaling, calculate_edc, estimate_decay_k_factor
+from utils.signal_proc import spectrogram_to_waveform, unscale_rir_from_reference
 from utils.inference_data_loading import (
     load_pretrained_model, data_params_from_run_config,
     build_test_dataloader, _normalize_batch_to_dict,
@@ -60,14 +60,15 @@ RANKING_METRICS = {
 # =============================================================================
 
 def prepare_batch(batch, data_info, device, src_trgt_dist_cond: bool = False):
-    """Extract real waveforms, conditions, and k_factors from a dataloader batch.
+    """Extract real waveforms, conditions, and the un-scaling reference from a dataloader batch.
 
     Handles both GTU tuple batches and SoundSpaces dict batches.
 
     Returns:
         real_waveforms: list of 1D numpy arrays
         conditions: torch tensor [B, cond_dim] on device
-        k_factors: torch tensor [B] or None (if no scaling)
+        reference: batched real RIRs [B, T] the generated RIRs are un-scaled against,
+                   or None when scaling is off
     """
     batch = _normalize_batch_to_dict(batch)
     rirs = batch['rir']
@@ -78,17 +79,15 @@ def prepare_batch(batch, data_info, device, src_trgt_dist_cond: bool = False):
 
     conditions = build_condition_tensor(batch, device, src_trgt_dist_cond)
 
-    k_factors = None
+    reference = None
     if data_info.get('scale_rir', False):
-        real_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in real_waveforms])
-        edc = calculate_edc(real_tensor)
-        k_factors, _ = estimate_decay_k_factor(edc, data_info['sr_target'], data_info.get('db_cutoff', -40))
+        reference = torch.stack([torch.tensor(w, dtype=torch.float32) for w in real_waveforms])
 
-    return real_waveforms, conditions, k_factors
+    return real_waveforms, conditions, reference
 
 
 def generate_for_scale(model, conditions, guidance_scale, sample_size, data_info,
-                       num_inference_steps, use_ddim, k_factors=None, images=None):
+                       num_inference_steps, use_ddim, reference=None, images=None):
     """Generate RIRs for one guidance scale and return waveforms.
 
     Returns:
@@ -107,9 +106,10 @@ def generate_for_scale(model, conditions, guidance_scale, sample_size, data_info
     hop_length, n_fft = data_info['hop_length'], data_info['n_fft']
     gen_waveforms = [spectrogram_to_waveform(generated_specs[i], hop_length, n_fft) for i in range(batch_size)]
 
-    if k_factors is not None:
+    if reference is not None:
         gen_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in gen_waveforms])
-        gen_unscaled = undo_rir_scaling(gen_tensor, k_factors, data_info['sr_target'])
+        gen_unscaled = unscale_rir_from_reference(gen_tensor, reference, data_info['sr_target'],
+                                                  data_info.get('db_cutoff', -40))
         gen_waveforms = [g.cpu().numpy() for g in gen_unscaled]
 
     return gen_waveforms
@@ -199,7 +199,7 @@ def regenerate_selected(model, test_dataset, sample_indices, top_scales, data_in
         gen_waveforms: dict {(idx, scale): 1D numpy array}
     """
     batch = collate_fn([test_dataset[i] for i in sample_indices])
-    real_waveforms, conditions, k_factors = prepare_batch(batch, data_info, device, src_trgt_dist_cond)
+    real_waveforms, conditions, reference = prepare_batch(batch, data_info, device, src_trgt_dist_cond)
 
     batch_dict = _normalize_batch_to_dict(batch)
     images = batch_dict['images'].to(device) if 'images' in batch_dict else None
@@ -211,7 +211,7 @@ def regenerate_selected(model, test_dataset, sample_indices, top_scales, data_in
         for scale in top_scales:
             gen_wavs = generate_for_scale(
                 model, conditions, scale, sample_size, data_info,
-                num_inference_steps, use_ddim, k_factors, images=images)
+                num_inference_steps, use_ddim, reference, images=images)
             for j, idx in enumerate(sample_indices):
                 gen_waveforms[(idx, scale)] = gen_wavs[j]
 
@@ -564,14 +564,14 @@ def main():
     print(f"Running sweep: {len(scales)} scales, {len(test_dataset)} samples, {len(test_dataloader)} batches...")
     with torch.no_grad():
         for batch in tqdm(test_dataloader, desc="Sweep"):
-            real_waveforms, conditions, k_factors = prepare_batch(batch, data_info, device, src_trgt_dist_cond)
+            real_waveforms, conditions, reference = prepare_batch(batch, data_info, device, src_trgt_dist_cond)
             batch_dict = _normalize_batch_to_dict(batch)
             images = batch_dict['images'].to(device) if 'images' in batch_dict else None
 
             for scale in scales:
                 gen_waveforms = generate_for_scale(
                     model, conditions, scale, sample_size, data_info,
-                    args.num_inference_steps, args.use_ddim, k_factors, images=images)
+                    args.num_inference_steps, args.use_ddim, reference, images=images)
 
                 for i in range(len(real_waveforms)):
                     rir_gen, rir_ref = align_rir_lengths(gen_waveforms[i], real_waveforms[i], mode='truncate')

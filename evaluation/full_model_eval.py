@@ -27,7 +27,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from utils.signal_proc import spectrogram_to_waveform, undo_rir_scaling, calculate_edc, estimate_decay_k_factor
+from utils.signal_proc import spectrogram_to_waveform, unscale_rir, unscale_rir_from_reference
 from utils.inference_data_loading import (
     load_pretrained_model, data_params_from_run_config,
     build_test_dataloader, _normalize_batch_to_dict,
@@ -74,6 +74,7 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, src_trgt_
     num_inference_steps = args.num_inference_steps
     octave_bands = args.octave_bands
     scale_rir = data_info.get('scale_rir', False)
+    scene_dataset = data_info['scene_dataset']
     use_baseline = args.baseline_method != 'none'
 
     # Print evaluation configuration
@@ -128,23 +129,20 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, src_trgt_
             # Convert generated spectrograms to waveforms
             gen_waveforms = [spectrogram_to_waveform(generated_specs[i], hop_length, n_fft) for i in range(batch_size)]
 
-            # Reference waveforms are already in unscaled space (raw from dataset)
-            # Generated waveforms need to be unscaled if scaling was used during training
+            # --- Un-scale generate RIR ---
             if scale_rir:
-                # Convert to tensors
-                real_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in real_waveforms])
                 gen_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in gen_waveforms])
 
-                # Compute k-factors from UNscaled reference RIRs (raw from dataset)
-                edc = calculate_edc(real_tensor)
-                k_factors, _ = estimate_decay_k_factor(edc, sr, data_info.get('db_cutoff', -40))
+                if scene_dataset == 'matterport3d':
+                    # The rate comes from the conditioning rt60, the same quantity training scaled with and the only one available at inference.
+                    gen_unscaled = unscale_rir(gen_tensor, sr, batch['rt60'].cpu())
+                else:
+                    # Aligned to the old training flow scaling method
+                    real_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in real_waveforms])
+                    gen_unscaled = unscale_rir_from_reference(gen_tensor, real_tensor, sr,
+                                                              data_info.get('db_cutoff', -40))
 
-                # Undo scaling ONLY on generated RIRs (reference is already unscaled)
-                gen_unscaled = undo_rir_scaling(gen_tensor, k_factors, sr)
-
-                # Convert back to lists of numpy arrays
                 gen_waveforms = [g.cpu().numpy() for g in gen_unscaled]
-                # real_waveforms already unscaled, no change needed
 
             # Evaluate each pair and store all samples
             for i in range(batch_size):
@@ -196,6 +194,24 @@ def check_training_inputs(run_config):
     return warnings
 
 
+def check_unscaling_method(data_info):
+    """
+    Flag the datasets whose generated RIRs are un-scaled with a rate fitted to the
+    ground-truth reference, which lends them some of the reference's own decay and
+    flatters every T60 reported here. Matterport3D takes its rate from the conditioning
+    rt60 instead; the branch is on the dataset name because nothing in a checkpoint
+    records which method trained it.
+    """
+    dataset = data_info['scene_dataset']
+    if dataset == 'matterport3d' or not data_info.get('scale_rir'):
+        return []
+    warning = (f"{dataset} RIRs are un-scaled with a decay rate fitted to the ground-truth "
+               f"reference, so the T60 figures below are optimistic. Move the dataset to "
+               f"rt60-derived scaling and update the branch in evaluate_test_set to drop this.")
+    print(f"\n  !! {warning}")
+    return [warning]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate RIR Diffusion Model on Test Set")
     parser.add_argument("--model_dir", type=str,
@@ -239,7 +255,7 @@ def main():
     src_trgt_dist_cond = run_config['model_config']['src_trgt_dist_cond']
     args.num_inference_steps = args.num_inference_steps or model.n_timesteps
     args.t60_fit_range = args.t60_fit_range or data_info['t60_fit_range']
-    input_warnings = check_training_inputs(run_config)
+    input_warnings = check_training_inputs(run_config) + check_unscaling_method(data_info)
     args.model_path = str(model_dir / 'model_best.pth.tar')  # for summary reporting
 
     # ---------- Load clean speech for reverbed LSD ----------
