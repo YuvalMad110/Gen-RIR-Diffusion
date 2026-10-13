@@ -449,61 +449,137 @@ def clarity_error(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
 # LSD (Log-Spectral Distance)
 # =============================================================================
 
-def compute_lsd(rir_gen: np.ndarray, rir_ref: np.ndarray, dry_signal: np.ndarray = None, n_fft: int = 2048, eps: float = 1e-10) -> float:
+LSD_PARAMS = {
+    'n_fft':    (256, 512, 1024),  # resolutions the distance is averaged over; hop is n_fft // 4
+    'floor_db': -80.0,             # bins are floored this far below the reference's loudest bin
+    'gate_db':  -60.0,             # frames whose reference energy is this far below its peak are skipped
+}
+
+
+def _lsd_signals(rir_gen: np.ndarray, rir_ref: np.ndarray, dry_signal: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Compute Log-Spectral Distance (LSD).
+    The pair the distance is measured on: the RIRs themselves, or dry speech convolved with each.
 
-    LSD = sqrt(mean((10*log10(|H_ref|²) - 10*log10(|H_gen|²))²))
-
-    If dry_signal is provided, computes LSD on reverbed signals (RIR convolved with dry signal).
-    Otherwise computes LSD directly on the RIR frequency responses.
-
-    Args:
-        rir_gen: Generated RIR
-        rir_ref: Reference RIR
-        dry_signal: Optional dry signal to convolve with RIRs for reverbed LSD
-        n_fft: FFT size
-        eps: Small constant for numerical stability
-
-    Returns:
-        LSD in dB
+    The generated RIR is scaled to the reference's energy, so the distance sees spectral shape
+    and not level. One factor covers the whole signal, leaving the balance between bands intact.
     """
-    rir_gen = np.asarray(rir_gen).flatten()
-    rir_ref = np.asarray(rir_ref).flatten()
+    rir_gen = np.asarray(rir_gen, dtype=np.float64).flatten()
+    rir_ref = np.asarray(rir_ref, dtype=np.float64).flatten()
 
-    # If dry signal provided, compute reverbed signals
+    energy_gen = np.sum(rir_gen ** 2)
+    if energy_gen > 0:
+        rir_gen = rir_gen * np.sqrt(np.sum(rir_ref ** 2) / energy_gen)
+
     if dry_signal is not None:
         dry_signal = np.asarray(dry_signal).flatten()
-        sig_gen = signal.fftconvolve(dry_signal, rir_gen, mode='full')
-        sig_ref = signal.fftconvolve(dry_signal, rir_ref, mode='full')
-    else:
-        sig_gen = rir_gen
-        sig_ref = rir_ref
+        rir_gen = signal.fftconvolve(dry_signal, rir_gen, mode='full')
+        rir_ref = signal.fftconvolve(dry_signal, rir_ref, mode='full')
 
-    # Zero-pad to same length
-    max_len = max(len(sig_gen), len(sig_ref), n_fft)
-    sig_gen_pad = np.zeros(max_len)
-    sig_ref_pad = np.zeros(max_len)
-    sig_gen_pad[:len(sig_gen)] = sig_gen
-    sig_ref_pad[:len(sig_ref)] = sig_ref
+    return align_rir_lengths(rir_gen, rir_ref, mode='pad')
 
-    # Compute magnitude spectra
-    H_gen = np.abs(np.fft.rfft(sig_gen_pad, n=n_fft))
-    H_ref = np.abs(np.fft.rfft(sig_ref_pad, n=n_fft))
 
-    # Log power spectra
-    log_H_gen = 10 * np.log10(H_gen ** 2 + eps)
-    log_H_ref = 10 * np.log10(H_ref ** 2 + eps)
+def _lsd_spectra(sig_gen: np.ndarray, sig_ref: np.ndarray, sr: int) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """
+    Log-power differences between the two signals, one entry per resolution in LSD_PARAMS.
 
-    # LSD
-    lsd = np.sqrt(np.mean((log_H_ref - log_H_gen) ** 2))
+    Frames where the reference has fallen more than gate_db below its loudest frame are dropped,
+    so silence and trailing zero-padding do not enter the distance. Both the floor and the gate
+    are taken relative to the reference, which leaves the distance unchanged when both signals
+    are scaled together.
 
-    return lsd
+    Returns:
+        [(freqs [bins], diff_db [bins, kept frames]), ...], one tuple per resolution
+    """
+    spectra = []
+
+    for n_fft in LSD_PARAMS['n_fft']:
+        noverlap = n_fft - n_fft // 4
+        freqs, _, spec_gen = signal.stft(sig_gen, fs=sr, nperseg=n_fft, noverlap=noverlap)
+        _,     _, spec_ref = signal.stft(sig_ref, fs=sr, nperseg=n_fft, noverlap=noverlap)
+
+        power_gen = np.abs(spec_gen) ** 2
+        power_ref = np.abs(spec_ref) ** 2
+
+        # Keep only the frames where the reference is still sounding
+        frame_energy = power_ref.sum(axis=0)
+        keep         = frame_energy > frame_energy.max() * 10 ** (LSD_PARAMS['gate_db'] / 10)
+
+        # Floor both spectra a fixed distance below the reference's loudest bin
+        floor = power_ref.max() * 10 ** (LSD_PARAMS['floor_db'] / 10)
+
+        diff_db = (10 * np.log10(power_ref[:, keep] + floor)
+                   - 10 * np.log10(power_gen[:, keep] + floor))
+        spectra.append((freqs, diff_db))
+
+    return spectra
+
+
+def _lsd_reduce(spectra: List[Tuple[np.ndarray, np.ndarray]], band: Tuple[float, float] = None) -> float:
+    """
+    Collapse log-power differences to one distance in dB: RMS across bins within each frame,
+    averaged over frames, then averaged over the resolutions.
+
+    Args:
+        spectra: as returned by _lsd_spectra
+        band:    (low, high) in Hz to restrict the bins to, or None for the full spectrum
+    """
+    values = []
+    for freqs, diff_db in spectra:
+        bins = np.ones(len(freqs), dtype=bool) if band is None else (freqs >= band[0]) & (freqs <= band[1])
+        if not bins.any() or diff_db.shape[1] == 0:
+            continue
+        values.append(np.sqrt((diff_db[bins] ** 2).mean(axis=0)).mean())
+
+    return float(np.mean(values)) if values else float('nan')
+
+
+def _lsd_bands(spectra: List[Tuple[np.ndarray, np.ndarray]], sr: int,
+               center_freqs: List[float]) -> Dict[float, float]:
+    """One distance per octave band, each averaged over the bins that band spans."""
+    nyquist = sr / 2
+    lsds    = {}
+    for fc in center_freqs:
+        f_low, f_high = fc / np.sqrt(2), fc * np.sqrt(2)
+        if f_low >= nyquist:
+            continue
+        lsds[fc] = _lsd_reduce(spectra, band=(f_low, min(f_high, nyquist)))
+
+    return lsds
+
+
+def compute_lsd(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int, dry_signal: np.ndarray = None) -> float:
+    """
+    Log-Spectral Distance between two RIRs, or between dry speech convolved with each.
+
+        LSD = 1/T * sum_t sqrt( 1/K * sum_k [10*log10(P_ref(t,k)) - 10*log10(P_gen(t,k))]^2 )
+
+    over the T frames and K bins of an STFT, averaged again over the resolutions in LSD_PARAMS.
+
+    Args:
+        rir_gen:    Generated RIR
+        rir_ref:    Reference RIR
+        sr:         Sample rate
+        dry_signal: Dry speech to convolve with both RIRs; without it the RIRs are compared directly
+
+    Returns:
+        LSD in dB, or NaN when the reference holds no frame above the gate
+    """
+    # The pair the distance is measured on
+    sig_gen, sig_ref = _lsd_signals(rir_gen, rir_ref, dry_signal)
+
+    # Log-power differences per frame and bin, one entry per STFT resolution
+    spectra = _lsd_spectra(sig_gen, sig_ref, sr)
+
+    # Collapse to a single dB figure across every bin
+    return _lsd_reduce(spectra)
 
 
 def compute_lsd_octave_bands(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int, center_freqs: List[float] = None, dry_signal: np.ndarray = None) -> Dict[float, float]:
     """
-    Compute LSD per octave band.
+    Compute LSD per octave band, each band averaging only the bins it spans.
+
+    The distance is the one compute_lsd documents, restricted to the bins between
+    fc/sqrt(2) and fc*sqrt(2).
 
     Args:
         rir_gen: Generated RIR
@@ -518,29 +594,14 @@ def compute_lsd_octave_bands(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int, 
     if center_freqs is None:
         center_freqs = DEFAULT_OCTAVE_BANDS
 
-    rir_gen = np.asarray(rir_gen).flatten()
-    rir_ref = np.asarray(rir_ref).flatten()
+    # The pair the distance is measured on
+    sig_gen, sig_ref = _lsd_signals(rir_gen, rir_ref, dry_signal)
 
-    lsds = {}
-    nyquist = sr / 2
+    # Log-power differences per frame and bin, one entry per STFT resolution
+    spectra = _lsd_spectra(sig_gen, sig_ref, sr)
 
-    for fc in center_freqs:
-        f_low = fc / np.sqrt(2)
-        f_high = fc * np.sqrt(2)
-
-        if f_low >= nyquist:
-            continue
-        f_high = min(f_high, nyquist * 0.99)
-
-        try:
-            sos = signal.butter(4, [f_low, f_high], btype='band', fs=sr, output='sos')
-            gen_filt = signal.sosfilt(sos, rir_gen)
-            ref_filt = signal.sosfilt(sos, rir_ref)
-            lsds[fc] = compute_lsd(gen_filt, ref_filt, dry_signal=dry_signal)
-        except Exception:
-            continue
-
-    return lsds
+    # Collapse to one dB figure per band
+    return _lsd_bands(spectra, sr, center_freqs)
 
 
 # =============================================================================
@@ -715,9 +776,10 @@ def evaluate_rir_pair(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
     if 'c80' in metrics:
         results['c80'] = clarity_error(rir_gen, rir_ref, sr, time_ms=80)
     if 'lsd' in metrics:
+        lsd_spectra = _lsd_spectra(*_lsd_signals(rir_gen, rir_ref, dry_signal), sr)
         results['lsd'] = {
-            'broadband': compute_lsd(rir_gen, rir_ref, dry_signal=dry_signal),
-            'per_band': compute_lsd_octave_bands(rir_gen, rir_ref, sr, center_freqs, dry_signal=dry_signal)
+            'broadband': _lsd_reduce(lsd_spectra),
+            'per_band': _lsd_bands(lsd_spectra, sr, center_freqs)
         }
     if 'edc_distance' in metrics:
         results['edc_distance'] = {

@@ -10,6 +10,7 @@ import soundfile as sf
 import torch
 from pathlib import Path
 
+from utils.acoustic_metrics import LSD_PARAMS
 from utils.misc import get_israel_time
 from utils.audio_processing import convolve_with_rir
 
@@ -213,6 +214,7 @@ def save_evaluation_summary(aggregate, n_samples, data_info, args, test_len, n_t
         f"Octave bands: {getattr(args, 'octave_bands', None)}",
         f"Num workers: {getattr(args, 'workers', None)}",
         f"T60 fit range (dB): {t60_fit_range}",
+        f"LSD: n_fft {LSD_PARAMS['n_fft']}, hop n_fft/4, Hann, floor {LSD_PARAMS['floor_db']:g} dB, frame gate {LSD_PARAMS['gate_db']:g} dB",
     ])
     if baseline_method:
         lines.append(f"Baseline method: {baseline_method}")
