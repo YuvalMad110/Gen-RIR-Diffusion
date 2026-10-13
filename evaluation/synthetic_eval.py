@@ -180,7 +180,7 @@ def evaluate_synthetic(synthetic_rirs, diffusion_rirs, conditions, sr, octave_ba
         rir_diff = diffusion_rirs[i]
 
         # Align lengths
-        rir_diff, rir_syn = align_rir_lengths(rir_diff, rir_syn, mode='truncate')
+        rir_diff, rir_syn = align_rir_lengths(rir_diff, rir_syn, mode='pad')
 
         # Compute metrics (synthetic is reference, diffusion is generated)
         metrics = evaluate_rir_pair(rir_diff, rir_syn, sr, octave_bands)

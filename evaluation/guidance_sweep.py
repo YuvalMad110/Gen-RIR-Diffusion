@@ -256,7 +256,7 @@ def plot_sweep_samples(sample_indices, labels, top_scales, ref_waveforms, gen_wa
         # Cols 1..n: Generated waveforms per scale + EDC overlay
         for k, scale in enumerate(top_scales):
             gen = gen_waveforms[(idx, scale)]
-            gen_al, _ = align_rir_lengths(gen, ref, mode='truncate')
+            gen_al, _ = align_rir_lengths(gen, ref, mode='pad')
             t_gen = np.arange(len(gen_al)) / sr * 1000
 
             axes[row, k + 1].plot(t_gen, gen_al, color=scale_colors[k], linewidth=0.5)
@@ -574,7 +574,7 @@ def main():
                     args.num_inference_steps, args.use_ddim, reference, images=images)
 
                 for i in range(len(real_waveforms)):
-                    rir_gen, rir_ref = align_rir_lengths(gen_waveforms[i], real_waveforms[i], mode='truncate')
+                    rir_gen, rir_ref = align_rir_lengths(gen_waveforms[i], real_waveforms[i], mode='pad')
                     metrics = evaluate_rir_pair(rir_gen, rir_ref, sr, octave_bands,
                                                dry_signal=dry_signal, metrics=eval_metrics)
                     results[scale].append(metrics)

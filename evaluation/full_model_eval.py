@@ -146,7 +146,7 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, src_trgt_
 
             # Evaluate each pair and store all samples
             for i in range(batch_size):
-                rir_gen, rir_ref = align_rir_lengths(gen_waveforms[i], real_waveforms[i], mode='truncate')
+                rir_gen, rir_ref = align_rir_lengths(gen_waveforms[i], real_waveforms[i], mode='pad')
                 metrics = evaluate_rir_pair(rir_gen, rir_ref, sr, octave_bands, dry_signal=dry_signal, fit_range=args.t60_fit_range)
                 all_metrics.append(metrics)
 
@@ -159,7 +159,7 @@ def evaluate_test_set(model, test_dataloader, device, data_info, args, src_trgt_
 
                 # Baseline evaluation
                 if use_baseline:
-                    rir_base, rir_ref_base = align_rir_lengths(baseline_waveforms[i], real_waveforms[i], mode='truncate')
+                    rir_base, rir_ref_base = align_rir_lengths(baseline_waveforms[i], real_waveforms[i], mode='pad')
                     baseline_metrics = evaluate_rir_pair(rir_base, rir_ref_base, sr, octave_bands, dry_signal=dry_signal, fit_range=args.t60_fit_range)
                     baseline_all_metrics.append(baseline_metrics)
                     sample_dict['baseline'] = rir_base

@@ -1149,7 +1149,7 @@ def _plot_secondary_peak_detection(rir, envelope, env_db, smoothed_env, sr,
 # =============================================================================
 
 def align_rir_lengths(rir1: np.ndarray, rir2: np.ndarray,
-                      mode: str = 'truncate') -> Tuple[np.ndarray, np.ndarray]:
+                      mode: str = 'pad') -> Tuple[np.ndarray, np.ndarray]:
     """
     Align two RIRs to the same length.
     
@@ -1165,16 +1165,15 @@ def align_rir_lengths(rir1: np.ndarray, rir2: np.ndarray,
     
     if mode == 'truncate':
         min_len = min(len(rir1), len(rir2))
-        return rir1[:min_len], rir2[:min_len]
+        rir1_out, rir2_out = rir1[:min_len], rir2[:min_len]
     elif mode == 'pad':
-        max_len = max(len(rir1), len(rir2))
-        rir1_pad = np.zeros(max_len)
-        rir2_pad = np.zeros(max_len)
-        rir1_pad[:len(rir1)] = rir1
-        rir2_pad[:len(rir2)] = rir2
-        return rir1_pad, rir2_pad
+        max_len  = max(len(rir1), len(rir2))
+        rir1_out = np.pad(rir1, (0, max_len - len(rir1)))
+        rir2_out = np.pad(rir2, (0, max_len - len(rir2)))
     else:
         raise ValueError(f"Unknown mode: {mode}")
+
+    return rir1_out, rir2_out
 
 
 if __name__ == "__main__":

@@ -613,8 +613,8 @@ def main():
         gen_wave_2 = run_inference_for_pair(model_2, batch, device, data_info, args, src_trgt_dist_cond_2)
 
         # Align lengths
-        gen_1, ref_a = align_rir_lengths(gen_wave_1, ref_wave, mode='truncate')
-        gen_2, ref_b = align_rir_lengths(gen_wave_2, ref_wave, mode='truncate')
+        gen_1, ref_a = align_rir_lengths(gen_wave_1, ref_wave, mode='pad')
+        gen_2, ref_b = align_rir_lengths(gen_wave_2, ref_wave, mode='pad')
 
         metrics_1 = evaluate_rir_pair(gen_1, ref_a, sr, args.octave_bands, fit_range=args.t60_fit_range)
         metrics_2 = evaluate_rir_pair(gen_2, ref_b, sr, args.octave_bands, fit_range=args.t60_fit_range)
