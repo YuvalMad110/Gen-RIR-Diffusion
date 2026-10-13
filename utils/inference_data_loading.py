@@ -149,7 +149,7 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
         data_params:  Dict as returned by data_params_from_run_config.
         batch_size:   Batch size for the DataLoader.
         workers:      Number of DataLoader workers.
-        run_config:   Full run_config dict.
+        run_config:   Full run_config dict. Its 'args' must carry every setting that shapes the split
 
     Returns:
         (test_dataset, test_dataloader)
@@ -164,17 +164,24 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
     a = run_config['args']
     ie_config = run_config.get('image_encoder_config')
 
-    rir_view_type = None if a.get('rir_view_type') == 'none' else a.get('rir_view_type')
-    room_overview_type = None if a.get('room_overview_type') == 'none' else a.get('room_overview_type')
+    rir_view_type = None if a['rir_view_type'] == 'none' else a['rir_view_type']
+    room_overview_type = None if a['room_overview_type'] == 'none' else a['room_overview_type']
     image_size = tuple(ie_config['image_size']) if ie_config and 'image_size' in ie_config else None
 
     _, _, test_dataset = create_soundspaces_datasets(
         scene_dataset=a['scene_dataset'],
-        rir_root=a.get('data_path'),
-        image_root=a.get('image_root'),
+        mapping_csv=a['mapping_csv'],
+        geometry_csv=a['geometry_csv'],
+        rir_root=a['data_path'],
+        image_root=a['image_root'],
         max_pairs_per_room=a['max_pairs_per_room'],
         balance_split_by=a['balance_split_by'],
-        scenes=a.get('scenes'),
+        min_rt60=a['min_rt60'],
+        max_scaled_peak=a['max_scaled_peak'],
+        max_void_indoor=a['max_void_indoor'],
+        max_void_outdoor=a['max_void_outdoor'],
+        max_room_void=a['max_room_void'],
+        scenes=a['scenes'],
         split=True,
         split_by_room=data_params['split_by_room'],
         train_ratio=data_params['train_ratio'],
@@ -185,9 +192,9 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
         sr_target=data_params['sr_target'],
         rir_view_type=rir_view_type,
         room_overview_type=room_overview_type,
-        room_overview_config=a.get('room_overview_config'),
+        room_overview_config=a['room_overview_config'],
         image_size=image_size,
-        use_rt60=a.get('use_rt60_condition', False),
+        use_rt60=a['use_rt60_condition'],
     )
 
     from data.dataset_collate_fn import scale_and_spectrogram_collate_fn
