@@ -444,14 +444,15 @@ class RIRDiffusionModel(torch.nn.Module):
         batch_size = cond.shape[0]
 
         # Build conditional encoding
-        scalar_token = self.encode_conditioning(cond)       # [B, 1, D]
-        if self.image_encoder is not None:
-            image_tokens = self.image_encoder(images)       # [B, T, D]
-            if self.fusion_block is not None:
-                scalar_token = self.fusion_block(scalar_token, image_tokens)
-            cond_encoded = torch.cat([scalar_token, image_tokens], dim=1)
-        else:
-            cond_encoded = scalar_token
+        with autocast("cuda", enabled=self.device.type == "cuda"):
+            scalar_token = self.encode_conditioning(cond)       # [B, 1, D]
+            if self.image_encoder is not None:
+                image_tokens = self.image_encoder(images)       # [B, T, D]
+                if self.fusion_block is not None:
+                    scalar_token = self.fusion_block(scalar_token, image_tokens)
+                cond_encoded = torch.cat([scalar_token, image_tokens], dim=1)
+            else:
+                cond_encoded = scalar_token
 
         seq_len   = cond_encoded.shape[1]
         null_cond = self.get_null_conditioning(batch_size, seq_len)
@@ -473,18 +474,19 @@ class RIRDiffusionModel(torch.nn.Module):
         inference_scheduler.set_timesteps(num_inference_steps)
 
         for t in tqdm(inference_scheduler.timesteps, desc="Generating", disable=not verbose):
-            if guidance_scale != 1.0:
-                # Unconditional prediction
-                uncond_output = self.model(noisy_rir, t, null_cond)["sample"]
-                # Conditional prediction
-                cond_output = self.model(noisy_rir, t, cond_encoded)["sample"]
-                # Guidance combination: uncond + scale * (cond - uncond)
-                model_output = uncond_output + guidance_scale * (cond_output - uncond_output)
-            else:
-                # Standard conditional generation (no guidance overhead)
-                model_output = self.model(noisy_rir, t, cond_encoded)["sample"]
+            with autocast("cuda", enabled=self.device.type == "cuda"):
+                if guidance_scale != 1.0:
+                    # Unconditional prediction
+                    uncond_output = self.model(noisy_rir, t, null_cond)["sample"]
+                    # Conditional prediction
+                    cond_output = self.model(noisy_rir, t, cond_encoded)["sample"]
+                    # Guidance combination: uncond + scale * (cond - uncond)
+                    model_output = uncond_output + guidance_scale * (cond_output - uncond_output)
+                else:
+                    # Standard conditional generation (no guidance overhead)
+                    model_output = self.model(noisy_rir, t, cond_encoded)["sample"]
 
-            noisy_rir = inference_scheduler.step(model_output, t, noisy_rir).prev_sample
+            noisy_rir = inference_scheduler.step(model_output.float(), t, noisy_rir).prev_sample
 
         return noisy_rir.cpu()
     
