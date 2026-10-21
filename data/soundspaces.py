@@ -458,6 +458,7 @@ def create_soundspaces_datasets(scene_dataset='matterport3d',
         If split=True:  (train_dataset, eval_dataset, test_dataset)
         If split=False: single dataset covering all rows
     """
+    # Setting defaults (by scene_dataset)
     d = DATASET_DEFAULTS[scene_dataset]
     mapping_csv  = mapping_csv  or d['mapping_csv']
     geometry_csv = geometry_csv or d['geometry_csv']

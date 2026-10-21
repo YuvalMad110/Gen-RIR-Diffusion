@@ -221,7 +221,7 @@ def parse_args():
     parser.add_argument("--guidance_scale", type=float, default=2.0, help="CFG scale (1.0=no guidance)")
     parser.add_argument("--num_inference_steps", type=int, default=50, help="Denoising steps")
     parser.add_argument("--use_ddim", action="store_true", help="Use DDIM sampling")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for evaluation")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size for evaluation")
     parser.add_argument("--octave_bands", type=float, nargs='+', default=DEFAULT_OCTAVE_BANDS)
     parser.add_argument("--save_path", type=str, default=None, help="Output directory")
     parser.add_argument("--n_examples", type=int, default=5, help="Number of example pairs to visualize")

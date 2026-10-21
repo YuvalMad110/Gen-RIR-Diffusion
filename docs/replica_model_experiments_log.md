@@ -1,4 +1,6 @@
-# Gen-RIR-Diffusion — Experiments Log
+# Gen-RIR-Diffusion — Replica Experiments Log
+
+> **Historical.** Every number here was measured with the earlier LSD, which took a single FFT of the whole signal truncated to 2048 samples and compared absolute levels — so it ignored everything past 128 ms and scored two RIRs with different tails as identical. We now consider that implementation wrong; the current frame-wise, gain-blind LSD is described in [`mp3d_model_experiments_log.md`](mp3d_model_experiments_log.md). The T60 windows and RIR alignment also differ, so these values are not comparable to the Matterport3D log and are kept for history only.
 
 All models: 3-block UNet [32, 64, 128], STFT spectrogram (2×129×345), sr=22050 Hz, 100 epochs, guidance scale λ=2.0, 50-step DDIM.  
 **Metrics:** T60 % = RT60 percentage error · DRR = DRR absolute error (dB) · LSD = Log Spectral Distance (dB). Lower is better for all.
