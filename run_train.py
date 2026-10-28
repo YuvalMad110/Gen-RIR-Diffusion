@@ -62,13 +62,14 @@ def parse_args():
                         help='Append precomputed RT60 to the SoundSpaces condition vector (requires 10_precompute_rt60.py)')
 
     # Training configuration
-    parser.add_argument('--batch-size', type=int, default=8)
+    parser.add_argument('--batch-size', type=int, default=72)
     parser.add_argument('--epochs', type=int, default=70)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--workers', type=int, default=10)
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--n-timesteps', type=int, default=1000)
     parser.add_argument('--checkpoint-freq', type=int, default=5)
+    parser.add_argument('--patience', type=int, default=0, help='Stop after this many epochs without a better eval loss (0 disables)')
     parser.add_argument('--eval-freq', type=int, default=1, help='Evaluate every N epochs')
     parser.add_argument('--use-eval', type=str2bool, default=True, help='Use evaluation dataset during training')
 
@@ -306,6 +307,7 @@ def main():
         lr=args.lr,
         epochs=args.epochs,
         checkpoint_freq=args.checkpoint_freq,
+        patience=args.patience,
         eval_freq=args.eval_freq,
         n_fft=args.n_fft,
         hop_length=args.hop_length,

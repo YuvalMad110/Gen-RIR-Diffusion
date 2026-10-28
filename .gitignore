@@ -1,5 +1,6 @@
 # ── Project outputs & logs ────────────────────────────────────────────────────
 outputs/
+docs/research_proposal/
 
 # ── Generated data files (reproducible via prep scripts) ─────────────────────
 data/replica/

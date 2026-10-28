@@ -37,7 +37,8 @@ class DiffusionTrainer():
                  run_header="",
                  src_trgt_dist_cond=False,
                  sr=None,
-                 loss_weighting=None):
+                 loss_weighting=None,
+                 patience=15):
         # -------- Cfg --------
         self.model = model
         self.optimizer = optimizer
@@ -48,6 +49,7 @@ class DiffusionTrainer():
         self.use_amp = torch.cuda.is_available() and self.device.type == 'cuda'
         self.checkpoint_freq = checkpoint_freq
         self.eval_freq = eval_freq
+        self.patience = patience   # stop after this many epochs without a new best eval loss
         self.logdir = get_timestamped_logdir('outputs/not_completed')
         self.n_fft = n_fft
         self.hop_length = hop_length
@@ -102,11 +104,15 @@ class DiffusionTrainer():
             # ---------- EVALUATION ----------
             cur_epoch_losses['eval_loss'], cur_epoch_losses['eval_norm_loss']= self._evaluation_epoch(eval_dataloader, epoch)
 
-            # ---------- EPOCH WRAP-UP ----------            
+            # ---------- EPOCH WRAP-UP ----------
             if self.accelerator.is_main_process:
                 best_loss, best_model_dict, losses_per_epoch = self._epoch_wrapup(
-                    epoch, cur_epoch_losses, best_loss, losses_per_epoch, 
+                    epoch, cur_epoch_losses, best_loss, losses_per_epoch,
                     train_start_time, best_model_dict, lr=self.optimizer.param_groups[0]['lr'])
+
+            # ---------- EARLY STOPPING ----------
+            if self._should_stop_early(epoch, best_model_dict):
+                break
 
         # ============= Training's finish =============
         # save Best model
@@ -279,7 +285,26 @@ class DiffusionTrainer():
         save_metric(losses_per_epoch['eval_norm_loss'], 'log-eval-norm-loss', plots_dir, apply_log=True)
         save_metric(losses_per_epoch['eval_norm_loss'], 'eval-norm-loss', plots_dir, apply_log=False)
 
-    def _epoch_wrapup(self, epoch, cur_epoch_losses, best_loss, losses_per_epoch, 
+    def _should_stop_early(self, epoch, best_model_dict):
+        """
+        Stop training once the eval loss has gone `patience` consecutive epochs without improving.
+
+        All processes reduce the same flag so they leave the epoch loop together.
+        """
+        stop = False
+        if self.accelerator.is_main_process and self.patience and best_model_dict is not None:
+            epochs_since_best = epoch + 1 - best_model_dict['epoch']
+            stop = epochs_since_best >= self.patience
+            if stop:
+                msg = (f"Stopping early after {epoch + 1} epochs: {epochs_since_best} without a new "
+                       f"best eval loss (patience {self.patience}), best at epoch {best_model_dict['epoch']}.")
+                logging.info(msg)
+                print(msg)
+
+        flag = torch.tensor([int(stop)], device=self.accelerator.device)
+        return bool(self.accelerator.reduce(flag, reduction='max').item())
+
+    def _epoch_wrapup(self, epoch, cur_epoch_losses, best_loss, losses_per_epoch,
                      train_start_time, best_model_dict, lr):
         """
         Wrap up the epoch, check for best model, save checkpoints, and log metrics.
