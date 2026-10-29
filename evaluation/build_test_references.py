@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from data.soundspaces import create_soundspaces_datasets
 from utils.io_utils import _fingerprint, compute_split_id
+from utils.misc import get_full_path
 
 STORE_NAME  = 'test_references.npz'
 CONFIG_NAME = 'reference_config.json'
@@ -322,12 +323,16 @@ def load_test_references(split_id: str, root=None) -> dict:
 def parse_args():
     parser = argparse.ArgumentParser(description='Build the evaluation reference store for a test split')
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument('--run-dir', type=str, help="A training run directory holding run_config.json")
+    source.add_argument('--run-dir', type=str, help='Run directory, or a bare folder name under outputs/finished/')
     source.add_argument('--config', type=str, help="A run_config.json or an experiment config of the same shape")
     parser.add_argument('--workers', type=int, default=8, help='DataLoader workers for reading RIRs')
     parser.add_argument('--root', type=str, default=None, help='Store root (default: data/references)')
     parser.add_argument('--overwrite', action='store_true', help='Rebuild even if a store is present')
-    return parser.parse_args()
+
+    args = parser.parse_args()
+    if args.run_dir:
+        args.run_dir = get_full_path(args.run_dir, 'outputs/finished')
+    return args
 
 
 def main():
