@@ -122,6 +122,33 @@ def save_split_identities(run_dir: str, datasets, names=('train', 'eval', 'test'
     return out_path
 
 
+def compute_split_id(mapping, mapping_md5: str, length: int = 12) -> str:
+    """
+    Stable id for the set of pairs a split holds, so one store of references can serve every
+    model trained on that split.
+
+    The identity columns are sorted before hashing, so row order cannot change the result. The
+    digest of the mapping CSV goes into the hash as well: the same pairs read from a rebuilt
+    mapping carry different conditions and metrics, so they must not share an id.
+
+    Args:
+        mapping:     a split's mapping frame, or any frame carrying the identity columns
+        mapping_md5: digest of the mapping CSV the frame came from, as run_config.json records
+                     it under inputs.mapping_csv.md5
+        length:      how many hex characters to keep
+
+    Returns:
+        The leading `length` hex characters of the MD5 over the sorted rows and the digest.
+    """
+    cols = [c for c in _SPLIT_ID_COLUMNS if c in mapping.columns]
+    if not cols:
+        raise ValueError(f'the frame carries none of the identity columns {_SPLIT_ID_COLUMNS}')
+
+    rows = mapping[cols].astype(str).agg('|'.join, axis=1)
+    payload = '\n'.join(sorted(rows))
+    return hashlib.md5(f'{payload}\n{mapping_md5}'.encode()).hexdigest()[:length]
+
+
 def _comment_header(chunk: bytes) -> list:
     """The leading '#' lines of a CSV, where the preparation scripts record how they built each column."""
     out = []
@@ -194,14 +221,21 @@ def describe_input_drift(fingerprint: Optional[Dict]) -> Optional[str]:
             f"The split and the conditioning values this evaluation serves may not be the ones it saw.")
 
 
-def save_run_config(run_dir: str, args, model_config: Dict, ie_config: Optional[Dict], git_hash: str,
-                    dataset=None, started_at: Optional[datetime] = None, dataset_defaults: Optional[Dict] = None) -> None:
+def save_run_config(run_dir: str, args, model_config: Dict, ie_config: Optional[Dict], git_hash: str, dataset=None,
+                    started_at: Optional[datetime] = None, dataset_defaults: Optional[Dict] = None, test_dataset=None) -> None:
     """
     Save all training settings as a single human-readable JSON for reproducibility.
 
     'args' holds what this run chose, 'dataset_defaults' the resolved entry describing the
     scene dataset itself; both are recorded so a command-line override stands out against
     the declared value it replaced.
+
+    Two further fields let an evaluation read off a checkpoint what it would otherwise guess.
+    'split_id' names the test split this run was given; it needs test_dataset and started_at,
+    since it is hashed together with the mapping-CSV digest recorded under 'inputs'.
+    'unscaling' names the inverse of the scaling the targets were trained on: training flattens
+    each RIR's decay at the rate its conditioning rt60 implies, so 'condition_rt60' is the
+    quantity a generated RIR is un-scaled with, and a run that scaled nothing records 'none'.
     """
     import socket
 
@@ -214,22 +248,33 @@ def save_run_config(run_dir: str, args, model_config: Dict, ie_config: Optional[
     if dataset is not None:   # the rate the RIRs are stored at, and sr_target as resolved
         saved_args.update(sr_native=dataset.sr_native, sr_target=dataset.sr_target)
 
+    inputs = None
+    if started_at is not None:
+        inputs = {
+            "started_at":   started_at.isoformat(timespec='seconds'),
+            "mapping_csv":  _fingerprint(saved_args.get('mapping_csv'), started_at),
+            "geometry_csv": _fingerprint(saved_args.get('geometry_csv'), started_at),
+        }
+
+    # The mapping digest is reused rather than recomputed: the CSV runs to gigabytes
+    mapping_md5 = ((inputs or {}).get('mapping_csv') or {}).get('md5')
+    split_id = (compute_split_id(test_dataset.mapping, mapping_md5)
+                if test_dataset is not None and mapping_md5 else None)
+
     record = {
         "timestamp": datetime.now().isoformat(timespec='seconds'),
         "git_hash": git_hash,
         "host": socket.gethostname(),
+        "split_id": split_id,
+        "unscaling": 'condition_rt60' if saved_args.get('scale_rir') else 'none',
         "args": saved_args,
         "dataset_defaults": dataset_defaults,
         "model_config": model_config,
         "image_encoder_config": ie_config,
     }
 
-    if started_at is not None:
-        record["inputs"] = {
-            "started_at":   started_at.isoformat(timespec='seconds'),
-            "mapping_csv":  _fingerprint(saved_args.get('mapping_csv'), started_at),
-            "geometry_csv": _fingerprint(saved_args.get('geometry_csv'), started_at),
-        }
+    if inputs is not None:
+        record["inputs"] = inputs
 
     out_path = Path(run_dir) / "run_config.json"
     with open(out_path, 'w') as f:

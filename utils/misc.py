@@ -124,42 +124,6 @@ def is_main_process(ddp_enabled):
     # Check if the current process is the main process (in case of DDP)
     return not ddp_enabled  or torch.distributed.get_rank() == 0
 
-def save_metric_old(metric_per_epoch, metric_name, save_path, apply_log=False):
-    """
-    Saves a graph of a given metric (e.g., loss or accuracy) over training epochs.
-    Optionally applies natural logarithm to the metric before plotting.
-
-    Args:
-        metric_per_epoch (list or array-like): Values of the metric for each epoch.
-        metric_name (str): Name of the metric (used in title and filename).
-        save_path (str): Directory path to save the plot. File will be named as '<metric_name>.png'.
-        apply_log (bool): Whether to apply natural log to the metric values before plotting.
-    """
-    # Ensure save directory exists
-    os.makedirs(save_path, exist_ok=True)
-
-    # Apply log if needed
-    if apply_log:
-        metric_vals = np.log(np.array(metric_per_epoch))
-        name_suffix = f"log_{metric_name}"
-        title = f'Log({metric_name}) per Epoch'
-    else:
-        metric_vals = metric_per_epoch
-        name_suffix = metric_name
-        title = f'{metric_name.capitalize()} per Epoch'
-
-    # Create and save plot
-    plot_filename = os.path.join(save_path, f"{name_suffix}.png")
-    plt.figure()
-    plt.plot(range(1, len(metric_vals) + 1), metric_vals, marker='o')
-    plt.title(title)
-    plt.xlabel('Epoch')
-    plt.ylabel(name_suffix)
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(plot_filename)
-    plt.close()
-
 def _epochs_with_values(metric_per_epoch):
     """
     Epoch numbers and values for the epochs in which a metric was measured.
