@@ -206,6 +206,7 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
         scale_rir_flag=False,
         use_spectrogram=False,
         apply_zero_tail=False,
+        use_rt60=a['use_rt60_condition'],
     )
 
     if nSamples is not None:

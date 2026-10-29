@@ -258,8 +258,7 @@ def main():
     # ---------- Create dataloaders ----------
     collate_fn = scale_and_spectrogram_collate_fn(
         sr=args.sr_target, db_cutoff=args.db_cutoff, n_fft=args.n_fft, hop_length=args.hop_length,
-        scale_rir_flag=args.scale_rir, use_spectrogram=False, apply_zero_tail=args.apply_zero_tail,
-    )
+        scale_rir_flag=args.scale_rir, use_spectrogram=False, apply_zero_tail=args.apply_zero_tail, use_rt60=args.use_rt60_condition)
     
     train_dataloader = make_train_dataloader(train_dataset, args, collate_fn)
 

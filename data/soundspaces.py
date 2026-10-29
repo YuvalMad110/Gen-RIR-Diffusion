@@ -152,11 +152,11 @@ class SoundSpacesDataset(Dataset):
     Dataset of (RIR, conditioning) pairs from SoundSpaces, for scenes drawn from
     either the Replica or the Matterport3D scene dataset.
 
-    Each sample returns a 6-tuple:
-        (rir, room_dim, mic_loc, speaker_loc, images, scene)
+    Each sample returns a 7-tuple:
+        (rir, room_dim, mic_loc, speaker_loc, images, scene, sample_id)
 
-    or a 7-tuple when use_rt60=True:
-        (rir, room_dim, mic_loc, speaker_loc, images, scene, rt60)
+    or an 8-tuple when use_rt60=True:
+        (rir, room_dim, mic_loc, speaker_loc, images, scene, sample_id, rt60)
 
     where:
         rir         — torch.Tensor [1, T]              mono RIR at sr_target
@@ -165,7 +165,8 @@ class SoundSpacesDataset(Dataset):
         speaker_loc — np.array     [u, v, z_norm]       source in room-aligned coords
         images      — torch.Tensor [N_img, 3, H, W]    stacked images, or None
         scene       — str                               scene name (e.g. 'office_2')
-        rt60        — float                             RT60 in seconds (7-tuple only)
+        sample_id   — str                               '<scene>/<receiver_idx>_<source_idx>', unique per pair and stable across runs
+        rt60        — float                             RT60 in seconds (8-tuple only)
 
     N_img = (1 if rir_view_type is not None else 0) + corners_per_room.
     All images are [3, H, W] float32 — RGB is ImageNet-normalised, depth is
@@ -177,9 +178,8 @@ class SoundSpacesDataset(Dataset):
         z_norm = height above floor (floor = 0)
 
     Args:
-        scene_dataset:        'replica' or 'matterport3d'. Replica keys geometry and
-                              overviews by scene; Matterport3D keys them by room,
-                              using receiver_region to identify it.
+        scene_dataset:        'replica' or 'matterport3d'. Replica keys geometry and overviews by scene;
+                              Matterport3D keys them by room, using receiver_region to identify it.
         mapping_df:           mapping table, already filtered and split by the factory
         geometry_csv:         path to room_geometry.csv
         rir_root:             root directory of SoundSpaces binaural RIRs
@@ -189,11 +189,12 @@ class SoundSpacesDataset(Dataset):
         room_overview_config: Replica only — path to JSON mapping scene → [corner_names],
                               e.g. {"office_2": ["top_corner1", "mid_corner3"]}
         split_name:           'train', 'eval', or 'test' — set by factory, not by user
-        sample_max_sec:       maximum RIR length in seconds (default 2)
+        sample_max_sec:       maximum RIR length in seconds (default 2). None returns every RIR at its native length,
+                              neither cropped nor zero-padded, which makes a batch ragged — single-sample use only.
         sr_target:            resample RIRs to this rate; None keeps the rate they are stored at
         image_size:           (H, W) to resize images to; required when loading images
         use_rt60:             if True, read the precomputed 'rt60' column from mapping_csv
-                              and return it as the 6th element of the sample tuple.
+                              and return it as the last element of the sample tuple.
                               Requires 10_precompute_rt60.py to have been run first.
     """
 
@@ -260,9 +261,11 @@ class SoundSpacesDataset(Dataset):
         if sr_orig != self.sr_target:
             rir = torchaudio.transforms.Resample(sr_orig, self.sr_target)(rir)
 
-        max_len = int(self.sr_target * self.sample_max_sec)
-        rir = torch.nn.functional.pad(rir, (0, max(0, max_len - rir.shape[-1])))
-        rir = rir[:, :max_len]
+        # None keeps the native length; otherwise every RIR leaves at exactly max_len
+        if self.sample_max_sec is not None:
+            max_len = int(self.sr_target * self.sample_max_sec)
+            rir = torch.nn.functional.pad(rir, (0, max(0, max_len - rir.shape[-1])))
+            rir = rir[:, :max_len]
 
         # ---- Room dimensions ----
         room_dim = np.array([float(geom['L_m']), float(geom['W_m']), float(geom['H_m'])],
@@ -277,7 +280,9 @@ class SoundSpacesDataset(Dataset):
         # ---- Images ----
         images = self._load_images(row)
 
-        out = (rir, room_dim, mic_loc, speaker_loc, images, row['scene'])
+        sample_id = f"{row['scene']}/{int(row['receiver_idx'])}_{int(row['source_idx'])}"
+
+        out = (rir, room_dim, mic_loc, speaker_loc, images, row['scene'], sample_id)
         if self.use_rt60:
             out += (float(row['rt60']),)
         return out

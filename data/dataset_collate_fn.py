@@ -9,7 +9,8 @@ def scale_and_spectrogram_collate_fn(sr: float,
                                      hop_length: int = 64,
                                      scale_rir_flag: bool = True,
                                      use_spectrogram: bool = True,
-                                     apply_zero_tail: bool = False):
+                                     apply_zero_tail: bool = False,
+                                     use_rt60: bool = False):
     """
     Factory that returns a collate function for use with DataLoader.
 
@@ -22,11 +23,11 @@ def scale_and_spectrogram_collate_fn(sr: float,
         'mic_loc'     — [B, 3]
         'speaker_loc' — [B, 3]
         'scene'       — list[str]         scene name per sample
+        'sample_id'   — list[str]         '<scene>/<receiver_idx>_<source_idx>' per sample
         'rt60'        — [B]              when use_rt60=True
         'images'      — [B, N, 3, H, W]  when images are present
-                        N = number of images per RIR sample. Currently N=1
-                        (one receiver→source RGB per pair); the design supports
-                        N>1 for future additions (e.g. overview images).
+                        N = number of images per RIR sample. Currently N=1 (one receiver→source RGB per pair);
+                        the design supports N>1 for future additions (e.g. overview images).
 
     Args:
         sr:              sample rate of the RIRs
@@ -36,6 +37,7 @@ def scale_and_spectrogram_collate_fn(sr: float,
         scale_rir_flag:  whether to flatten each RIR's decay, at the rate its rt60 implies
         use_spectrogram: whether to convert to spectrogram
         apply_zero_tail: whether to zero the signal after the db_cutoff point
+        use_rt60:        must match the dataset's own use_rt60, since it sets how many fields each sample carries
     """
 
     def _process_rirs(rirs, rt60s):
@@ -63,21 +65,23 @@ def scale_and_spectrogram_collate_fn(sr: float,
         }
 
     def soundspaces_collate(batch: List[Tuple]) -> dict:
-        # Tuple layout: (rir, room_dim, mic_loc, speaker_loc, images, scene, *rt60(*optional))
-        if len(batch[0]) == 7:
-            rirs, room_dims, mic_locs, speaker_locs, images, scenes, rt60s = zip(*batch)
-        elif len(batch[0]) == 6:
-            rirs, room_dims, mic_locs, speaker_locs, images, scenes = zip(*batch)
-            rt60s = None
+        # Tuple layout: (rir, room_dim, mic_loc, speaker_loc, images, scene, sample_id[, rt60])
+        n_fields = 8 if use_rt60 else 7
+        if len(batch[0]) != n_fields:
+            raise ValueError(f"soundspaces_collate: use_rt60={use_rt60} expects {n_fields} fields per sample, "
+                f"got {len(batch[0])} — the collate and the dataset disagree on use_rt60.")
+
+        if use_rt60:
+            rirs, room_dims, mic_locs, speaker_locs, images, scenes, sample_ids, rt60s = zip(*batch)
+            rt60 = torch.tensor(rt60s, dtype=torch.float32)
         else:
-            raise ValueError(
-                f"soundspaces_collate: expected 6 or 7 fields, got {len(batch[0])}."
-            )
-        rt60 = torch.tensor(rt60s, dtype=torch.float32) if rt60s is not None else None
+            rirs, room_dims, mic_locs, speaker_locs, images, scenes, sample_ids = zip(*batch)
+            rt60 = None
 
         d = {
-            'rir':   _process_rirs(rirs, rt60),
-            'scene': list(scenes),
+            'rir':       _process_rirs(rirs, rt60),
+            'scene':     list(scenes),
+            'sample_id': list(sample_ids),
             **_stack_locs(room_dims, mic_locs, speaker_locs),
         }
         if rt60 is not None:
