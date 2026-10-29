@@ -5,6 +5,7 @@ docs/research_proposal/
 # ── Generated data files (reproducible via prep scripts) ─────────────────────
 data/replica/
 data/matterport3d/
+data/references/
 
 # ── Dataset backups — the manifest is tracked, the archives are not ──────────
 data/backups/*
