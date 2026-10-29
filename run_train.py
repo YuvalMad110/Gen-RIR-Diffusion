@@ -121,6 +121,8 @@ def parse_args():
 
     if args.scale_rir and not args.use_rt60_condition:
         parser.error('--scale-rir takes its decay rate from the stored rt60, so it requires --use-rt60-condition.')
+    if args.eval_freq > args.epochs:
+        parser.error(f'--eval-freq {args.eval_freq} over --epochs {args.epochs} never runs an evaluation pass.')
     return args
 
 def load_model_config(config_path, use_rt60_condition=False):

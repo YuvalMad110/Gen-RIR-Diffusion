@@ -160,9 +160,29 @@ def save_metric_old(metric_per_epoch, metric_name, save_path, apply_log=False):
     plt.savefig(plot_filename)
     plt.close()
 
+def _epochs_with_values(metric_per_epoch):
+    """
+    Epoch numbers and values for the epochs in which a metric was measured.
+
+    An epoch the metric skipped holds None — the evaluation pass runs every eval_freq epochs —
+    so those are dropped and the remaining values keep the 1-based epoch numbers they were
+    measured at.
+
+    Returns:
+        (epochs, values) as float arrays, both empty when the metric was never measured.
+    """
+    pairs = [(i + 1, v) for i, v in enumerate(metric_per_epoch) if v is not None]
+    if not pairs:
+        return np.array([]), np.array([])
+    epochs, values = zip(*pairs)
+    return np.array(epochs, dtype=float), np.array(values, dtype=float)
+
+
 def save_metric(metric_per_epoch, metric_name, save_path, apply_log=False):
     """
-    Saves a graph of training metrics over epochs.
+    Saves a graph of training metrics over epochs, plotting each value at the epoch it was
+    measured at. Writes no file when the metric holds no values at all.
+
     If input is a list, plots a single metric.
     If input is a dictionary, plots multiple metrics on the same graph.
 
@@ -175,15 +195,24 @@ def save_metric(metric_per_epoch, metric_name, save_path, apply_log=False):
     os.makedirs(save_path, exist_ok=True)
     plt.figure()
 
+    series = metric_per_epoch if isinstance(metric_per_epoch, dict) else {metric_name: metric_per_epoch}
+    plotted = 0
+    for key, raw in series.items():
+        epochs, values = _epochs_with_values(raw)
+        if len(values) == 0:
+            continue
+        if apply_log:
+            values = np.log(np.clip(values, a_min=1e-8, a_max=None))
+        plt.plot(epochs, values, marker='o', label=key)
+        plotted += 1
+
+    # A metric measured in no epoch at all gets no plot, e.g. eval_freq above the epoch count
+    if plotted == 0:
+        plt.close()
+        return
+
     if isinstance(metric_per_epoch, dict):
-        for key, values in metric_per_epoch.items():
-            if apply_log:
-                values = np.log(np.array(values))
-            plt.plot(range(1, len(values) + 1), values, marker='o', label=key)
         plt.legend()
-    else:
-        values = np.log(np.clip(np.array(metric_per_epoch), a_min=1e-8, a_max=None)) if apply_log else metric_per_epoch
-        plt.plot(range(1, len(values) + 1), values, marker='o')
 
     title = f"{'Log ' if apply_log else ''}{metric_name.capitalize()} per Epoch"
     ylabel = "Log Loss" if apply_log else "Loss"
