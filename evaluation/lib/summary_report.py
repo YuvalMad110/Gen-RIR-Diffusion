@@ -14,7 +14,7 @@ instead of having to be subtracted.
 import os
 from datetime import datetime
 
-from evaluation.metrics_utils import LSD_LENGTHS
+from evaluation.lib.metrics_utils import LSD_LENGTHS
 
 WIDTH = 100
 MISSING = '—'

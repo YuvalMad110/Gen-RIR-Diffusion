@@ -30,8 +30,8 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from evaluation.build_test_references import build_reference_dataset, resolve_split_id
-from evaluation.generation_utils import (effective_sampler, generation_dir, generation_tag,
-                                         inspect_existing, save_generations)
+from evaluation.lib.generation_utils import (effective_sampler, generation_dir, generation_tag,
+                                             inspect_existing, save_generations)
 from utils.dataset_utils import build_condition_tensor
 from utils.inference_data_loading import (build_test_dataloader, data_params_from_run_config,
                                           load_pretrained_model)

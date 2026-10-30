@@ -36,12 +36,12 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from evaluation.build_test_references import load_test_references
-from evaluation.generation_utils import CONFIG_NAME as GENERATION_CONFIG
-from evaluation.generation_utils import generation_dir, load_generations
-from evaluation.metrics_utils import aggregate, score_pair
-from evaluation.result_plots import (format_title, plot_comparison, plot_edc_per_band,
-                                     plot_histograms, select_samples)
-from evaluation.summary_report import write_summary
+from evaluation.lib.generation_utils import CONFIG_NAME as GENERATION_CONFIG
+from evaluation.lib.generation_utils import generation_dir, load_generations
+from evaluation.lib.metrics_utils import aggregate, score_pair
+from evaluation.lib.result_plots import (format_title, plot_comparison, plot_edc_per_band,
+                                         plot_histograms, select_samples)
+from evaluation.lib.summary_report import write_summary
 from utils.acoustic_metrics import DEFAULT_OCTAVE_BANDS, DEFAULT_T60_FIT_RANGE
 from utils.misc import get_full_path
 

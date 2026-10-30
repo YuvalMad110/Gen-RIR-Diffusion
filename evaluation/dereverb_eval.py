@@ -103,7 +103,7 @@ from utils.misc import str2bool, get_full_path
 from utils.signal_proc import spectrogram_to_waveform, unscale_rir_from_reference
 
 # --- Dereverberation model interface -----------------------------------------
-from dereverberation_models import build_dereverb_model, DEREVERB_SR, DereverbModel
+from evaluation.lib.dereverberation_models import build_dereverb_model, DEREVERB_SR, DereverbModel
 
 
 # =============================================================================
