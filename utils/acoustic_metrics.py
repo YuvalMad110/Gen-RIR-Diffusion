@@ -251,6 +251,27 @@ def t60_error(rir_gen: np.ndarray, rir_ref: np.ndarray, sr: int,
     }
 
 
+def compute_t60_crossings(rir: np.ndarray, sr: int) -> float:
+    """
+    T60 from the Schroeder curve's first crossings of -5 and -65 dB, extrapolated to 60 dB.
+
+    This is pyroomacoustics.measure_rt60, the estimator Image2Reverb and AV-RIR report, so it
+    is the one to quote alongside their published figures. compute_t60 fits a line over a dB
+    window instead, which is less sensitive to where the curve happens to cross a single level.
+
+    Returns:
+        T60 in seconds, or NaN when the decay never reaches -5 dB.
+    """
+    # Imported here so the data-preparation scripts that use this module do not pay for it
+    from pyroomacoustics.experimental.rt60 import measure_rt60
+
+    try:
+        value = float(measure_rt60(np.asarray(rir, dtype=np.float64).flatten(), sr))
+    except Exception:
+        return float('nan')
+    return value if value > 0.0 else float('nan')
+
+
 # =============================================================================
 # EDT (Early Decay Time)
 # =============================================================================
@@ -1174,6 +1195,43 @@ def align_rir_lengths(rir1: np.ndarray, rir2: np.ndarray,
         raise ValueError(f"Unknown mode: {mode}")
 
     return rir1_out, rir2_out
+
+
+def peak_shift(rir_gen: np.ndarray, rir_ref: np.ndarray) -> int:
+    """
+    Where the generated direct sound lands relative to the reference's, in samples.
+
+    Positive means the generated peak arrives late. Both peaks are taken as the largest
+    absolute sample, which is the direct sound in any RIR that has one.
+    """
+    gen = np.asarray(rir_gen).flatten()
+    ref = np.asarray(rir_ref).flatten()
+    return int(np.abs(gen).argmax()) - int(np.abs(ref).argmax())
+
+
+def align_peaks(rir_gen: np.ndarray, rir_ref: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Shift the generated RIR so its peak sits on the reference's, keeping both lengths.
+
+    The shift is a roll with zero fill, so no sample wraps from one end to the other. Use this
+    to measure how well a decay is reproduced independently of when it starts.
+
+    Returns:
+        (shifted generated, reference unchanged)
+    """
+    gen = np.asarray(rir_gen, dtype=np.float64).flatten()
+    ref = np.asarray(rir_ref, dtype=np.float64).flatten()
+
+    shift = -peak_shift(gen, ref)
+    if shift == 0:
+        return gen, ref
+
+    shifted = np.zeros_like(gen)
+    if shift > 0:
+        shifted[shift:] = gen[:len(gen) - shift]
+    else:
+        shifted[:len(gen) + shift] = gen[-shift:]
+    return shifted, ref
 
 
 if __name__ == "__main__":

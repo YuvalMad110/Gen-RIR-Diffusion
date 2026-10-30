@@ -9,8 +9,12 @@ a metric change costs no GPU time at all.
 Only the generated waveforms are saved. The references they are scored against come from the
 shared store that build_test_references.py writes, keyed by the same split_id.
 
-    python3 evaluation/pre_generate.py --run-dir outputs/finished/<run>
-    python3 evaluation/pre_generate.py --run-dir outputs/finished/<run> --num-inference-steps 50 --guidance-scale 2.0
+--run-dir takes a bare run name, which is looked up under outputs/finished/, or a path to a run
+directory anywhere.
+
+    python3 evaluation/pre_generate.py --run-dir Oct24_01-07-43_dsief08
+    python3 evaluation/pre_generate.py --run-dir Oct24_01-07-43_dsief08 --num-inference-steps 50 --guidance-scale 2.0
+    python3 evaluation/pre_generate.py --run-dir outputs/finished/Oct24_01-07-43_dsief08 --limit 64
 """
 
 import argparse
@@ -33,6 +37,28 @@ from utils.inference_data_loading import (build_test_dataloader, data_params_fro
                                           load_pretrained_model)
 from utils.misc import get_full_path
 from utils.signal_proc import spectrogram_to_waveform, unscale_rir
+
+
+# =============================================================================
+# Arguments
+# =============================================================================
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Generate a trained model's RIRs over its test split")
+    parser.add_argument('--run-dir', type=str, required=True, help='Run directory, or a bare folder name under outputs/finished/')
+    parser.add_argument('--num-inference-steps', type=int, default=200, help='Reverse diffusion steps; fewer than the model was trained with forces DDIM')
+    parser.add_argument('--guidance-scale', type=float, default=2.0, help='Classifier-free guidance scale')
+    parser.add_argument('--use-ddim', action='store_true', help='Use DDIM; fewer steps than trained forces it anyway')
+    parser.add_argument('--seed', type=int, default=42, help='Seed for the sampling noise')
+    parser.add_argument('--batch-size', type=int, default=72)
+    parser.add_argument('--workers', type=int, default=10)
+    parser.add_argument('--limit', type=int, default=None, help='Generate only the first N samples, for a smoke test')
+    parser.add_argument('--overwrite', action='store_true', help='Replace a set generated with different settings')
+    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+
+    args = parser.parse_args()
+    args.run_dir = get_full_path(args.run_dir, 'outputs/finished')
+    return args
 
 
 # =============================================================================
@@ -183,24 +209,6 @@ def generate_test_split(model, dataloader, settings: dict, device, src_trgt_dist
 # =============================================================================
 # Main
 # =============================================================================
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Generate a trained model's RIRs over its test split")
-    parser.add_argument('--run-dir', type=str, required=True, help='Run directory, or a bare folder name under outputs/finished/')
-    parser.add_argument('--num-inference-steps', type=int, default=200, help='Reverse diffusion steps; fewer than the model was trained with forces DDIM')
-    parser.add_argument('--guidance-scale', type=float, default=2.0, help='Classifier-free guidance scale')
-    parser.add_argument('--use-ddim', action='store_true', help='Use DDIM; fewer steps than trained forces it anyway')
-    parser.add_argument('--seed', type=int, default=42, help='Seed for the sampling noise')
-    parser.add_argument('--batch-size', type=int, default=72)
-    parser.add_argument('--workers', type=int, default=10)
-    parser.add_argument('--limit', type=int, default=None, help='Generate only the first N samples, for a smoke test')
-    parser.add_argument('--overwrite', action='store_true', help='Replace a set generated with different settings')
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
-
-    args = parser.parse_args()
-    args.run_dir = get_full_path(args.run_dir, 'outputs/finished')
-    return args
-
 
 def main():
     args = parse_args()
