@@ -252,6 +252,10 @@ def plot_comparison(selected: dict, generations: dict, references: dict, rows: l
     fig, axes = plt.subplots(len(ordered), 5, figsize=(23.5, 2.6 * len(ordered)), squeeze=False,
                              gridspec_kw={'width_ratios': [1, 1, 1, 1, 1.7]})
 
+    # Room dimensions come from the mapping CSV, which a baseline scored on its own corpus has
+    # no counterpart to; the text panel drops that line rather than the panel
+    room_dims = references.get('room_dim')
+
     for row_axes, (category, index) in zip(axes, ordered):
         reference = np.asarray(references['references'][index], dtype=np.float64).flatten()
         generated = np.asarray(generations['generated'][index], dtype=np.float64).flatten()
@@ -265,7 +269,8 @@ def plot_comparison(selected: dict, generations: dict, references: dict, rows: l
 
         _plot_overlay(row_axes[2], reference, generated, sr, xlim)
         _plot_edc(row_axes[3], reference, generated, sr, xlim, fit_range)
-        _plot_text_box(row_axes[4], rows[index], references['room_dim'][index])
+        _plot_text_box(row_axes[4], rows[index],
+                       None if room_dims is None else room_dims[index])
 
     fig.suptitle(title, fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.98))

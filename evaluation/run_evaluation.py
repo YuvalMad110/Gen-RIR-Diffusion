@@ -22,25 +22,18 @@ import argparse
 import json
 import os
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
-
-import librosa
-import numpy as np
-import pandas as pd
-import soundfile as sf
-from multiprocessing import Pool
-from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from evaluation.build_test_references import load_test_references
 from evaluation.lib.generation_utils import CONFIG_NAME as GENERATION_CONFIG
 from evaluation.lib.generation_utils import generation_dir, load_generations
-from evaluation.lib.metrics_utils import aggregate, score_pair
-from evaluation.lib.result_plots import (format_title, plot_comparison, plot_edc_per_band,
-                                         plot_histograms, select_samples)
+from evaluation.lib.metrics_utils import aggregate
+from evaluation.lib.result_writers import (load_dry_signal, report_failures, resolve_output_dir,
+                                           score_rows, write_figures, write_metrics_csv,
+                                           write_reverb_speech)
 from evaluation.lib.summary_report import write_summary
 from utils.acoustic_metrics import DEFAULT_OCTAVE_BANDS, DEFAULT_T60_FIT_RANGE
 from utils.misc import get_full_path
@@ -177,113 +170,30 @@ def check_generations_match_store(generations: dict, references: dict) -> None:
     print(f'  alignment ok: {len(gen_ids):,} sample_ids match element-wise, {scope}')
 
 
-def load_dry_signal(speech_path: str, sr: int):
-    """The clean speech both signals are convolved with before an LSD, resampled to sr."""
-    signal, _ = librosa.load(speech_path, sr=sr)
-    print(f'  speech: {Path(speech_path).name}, {len(signal) / sr:.2f}s at {sr} Hz')
-    return np.asarray(signal, dtype=np.float64)
-
-
 # =============================================================================
 # Scoring
 # =============================================================================
 
-# Settings a worker reuses for every pair, filled once per process by the pool's initializer
-_WORKER = {}
-
-
-def _init_worker(sr: int, dry_signal, t60_fit_range, octave_bands) -> None:
-    """Give this process the settings every pair is scored with."""
-    _WORKER.update(sr=sr, dry_signal=dry_signal, t60_fit_range=t60_fit_range,
-                   octave_bands=octave_bands)
-
-
-def _score_one(task: tuple) -> dict:
-    """One pair, against the settings this process was initialised with."""
-    generated, reference, reference_metrics = task
-    return score_pair(generated, reference, reference_metrics, _WORKER['sr'],
-                      dry_signal=_WORKER['dry_signal'], t60_fit_range=_WORKER['t60_fit_range'],
-                      octave_bands=_WORKER['octave_bands'])
-
-
-def score_split(generations: dict, references: dict, sr: int, dry_signal, octave_bands,
-                t60_fit_range, limit=None, workers: int = 1) -> list:
+def build_tasks(generations: dict, references: dict, limit=None) -> tuple:
     """
-    Score every pair and return the per-pair rows, in the order the pairs are stored.
+    Pair the generations with the store's references and reference values, ready to score.
 
-    Each pair is scored independently, so the work splits across processes with no effect on the
-    result: the pool preserves order and every measurement reads only its own pair. Each row
-    carries its identity columns ahead of the metrics, so the table stands alone.
+    The reference T60, C50 and DRR come from the store, which cached what the preparation
+    scripts measured on the same native-length signal, so nothing is re-measured here.
 
     Returns:
-        A list of flat dicts, one per pair.
+        (tasks, identities), one entry each per pair and in the stored order.
     """
     count = len(generations['sample_id']) if not limit else min(limit, len(generations['sample_id']))
     identities = [{column: references[column][i] for column in IDENTITY_COLUMNS} for i in range(count)]
     tasks = [(generations['generated'][i], references['references'][i],
               {key: references[key][i] for key in ('rt60', 'c50', 'drr')}) for i in range(count)]
-
-    started = time.time()
-    if workers > 1:
-        with Pool(workers, initializer=_init_worker,
-                  initargs=(sr, dry_signal, t60_fit_range, octave_bands)) as pool:
-            scored = list(tqdm(pool.imap(_score_one, tasks, chunksize=8),
-                               desc='Scoring', total=count))
-    else:
-        _init_worker(sr, dry_signal, t60_fit_range, octave_bands)
-        scored = [_score_one(task) for task in tqdm(tasks, desc='Scoring', total=count)]
-
-    elapsed = time.time() - started
-    print(f'  scored {count:,} pairs in {elapsed / 60:.1f} min ({elapsed / max(count, 1):.2f}s each, '
-          f'{workers} worker{"s" if workers > 1 else ""})')
-    return [{**identity, **metrics} for identity, metrics in zip(identities, scored)]
-
-
-def report_failures(stats: dict, n_scored: int) -> None:
-    """Name every metric that could not be measured on part of the split, or say that none could not."""
-    failed = {key: n_scored - entry['n'] for key, entry in stats.items()
-              if isinstance(entry, dict) and entry.get('n', n_scored) < n_scored}
-    if not failed:
-        print(f'  every metric measured on all {n_scored:,} pairs')
-        return
-
-    listed = ', '.join(f'{key} {count:,}' for key, count in sorted(failed.items(), key=lambda kv: -kv[1]))
-    print(f'  metrics with failures ({len(failed)}): {listed}')
+    return tasks, identities
 
 
 # =============================================================================
 # Writing
 # =============================================================================
-
-def resolve_output_dir(run_dir, tag: str) -> Path:
-    """
-    Where this evaluation's results go, versioned so an earlier run's numbers survive.
-
-    The version is one past the highest already there, not the first free number, so a deleted
-    evaluation leaves a gap rather than having its number handed to a later run.
-
-    Returns:
-        <run_dir>/evaluation/<tag>, or <tag>_v<highest + 1>.
-    """
-    base = Path(run_dir) / 'evaluation' / tag
-    if not base.exists():
-        return base
-
-    versions = [int(suffix) for path in base.parent.glob(f'{tag}_v*')
-                for suffix in [path.name.rsplit('_v', 1)[-1]] if suffix.isdigit()]
-    return base.parent / f'{tag}_v{max(versions, default=1) + 1}'
-
-
-def write_metrics_csv(path: Path, rows: list) -> Path:
-    """Write the per-pair table through a temp path and a rename."""
-    frame = pd.DataFrame(rows)
-    ordered = list(IDENTITY_COLUMNS) + [c for c in frame.columns if c not in IDENTITY_COLUMNS]
-
-    staging = path.with_suffix('.csv.tmp')
-    frame[ordered].to_csv(staging, index=False)
-    os.replace(staging, path)
-    return path
-
 
 def build_header_fields(generation_config: dict, tag: str, speech_path: str) -> dict:
     """The summary's header, in the order it is printed, with 'Model' first."""
@@ -302,7 +212,7 @@ def write_results(target_dir: Path, rows: list, stats: dict, generation_config: 
     """Write the per-pair table, the summary and the configuration that produced them."""
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    write_metrics_csv(target_dir / METRICS_NAME, rows)
+    write_metrics_csv(target_dir / METRICS_NAME, rows, IDENTITY_COLUMNS)
     write_summary(str(target_dir / SUMMARY_NAME), stats,
                   build_header_fields(generation_config, tag, args.lsd_speech),
                   len(rows), n_total, args.octave_bands)
@@ -332,105 +242,6 @@ def _title_base(generation_config: dict, tag: str) -> dict:
             'guidance': generation_config.get('guidance_scale')}
 
 
-def write_figures(target_dir: Path, rows: list, generations: dict, references: dict, sr: int,
-                  generation_config: dict, tag: str, args) -> None:
-    """
-    A comparison and a per-band figure for each plotted metric, and one histogram grid.
-
-    Each metric ranks its own pairs, so the comparison for C50 shows the pairs C50 is worst on
-    rather than the pairs some other metric chose.
-    """
-    figure_dir = target_dir / 'figures'
-    edc_dir = figure_dir / 'edc'
-    edc_dir.mkdir(parents=True, exist_ok=True)
-    base = _title_base(generation_config, tag)
-
-    drawn = []
-    for metric in args.plot_metrics:
-        selected = select_samples(rows, metric, args.plot_samples)
-        if not selected:
-            print(f'  no finite {metric} to rank on; skipped its figures')
-            continue
-
-        plot_comparison(selected, generations, references, rows, sr,
-                        format_title({**base, 'selected by': metric}),
-                        figure_dir / f'{metric}_comparison.png',
-                        max_sec=args.plot_max_sec, fit_range=tuple(args.t60_fit_range))
-        plot_edc_per_band(selected, generations, references, rows, sr,
-                          format_title({**base, 'EDC per band, selected by': metric}),
-                          edc_dir / f'{metric}_edc_per_band.png',
-                          octave_bands=args.octave_bands, max_sec=args.plot_max_sec,
-                          fit_range=tuple(args.t60_fit_range))
-        drawn.append(metric)
-
-    plot_histograms(rows, format_title({**base, 'pairs': f'{len(rows):,}'}),
-                    figure_dir / 'metric_histograms.png')
-    print(f'  figures for {", ".join(drawn) if drawn else "no metric"}, plus the histogram grid')
-
-
-# =============================================================================
-# Reverberant speech
-# =============================================================================
-
-def _write_pair(directory: Path, category: str, speech: str, reference_wet, generated_wet,
-                sr: int) -> None:
-    """
-    One pair of reverberant signals, scaled together.
-
-    Both are divided by whichever of the two peaks is larger, so neither clips and the level
-    the model produced stays audible against the reference instead of being normalised away.
-    """
-    peak = max(np.abs(reference_wet).max(), np.abs(generated_wet).max())
-    scale = 0.95 / peak if peak > 0 else 1.0
-    sf.write(directory / f'{category}_ref_{speech}.wav', reference_wet * scale, sr, subtype='PCM_16')
-    sf.write(directory / f'{category}_gen_{speech}.wav', generated_wet * scale, sr, subtype='PCM_16')
-
-
-def write_reverb_speech(target_dir: Path, rows: list, generations: dict, references: dict,
-                        sr: int, metrics, speech_paths) -> int:
-    """
-    Render the best, median and worst pair of each metric as reverberant speech, to listen to.
-
-    The clean speech sits beside the metric folders, so a sample can always be compared with
-    what went into it. One pair per category: these are listening examples, not a ranking.
-
-    Returns:
-        How many wav files were written, the clean copies included.
-    """
-    reverb_dir = target_dir / 'reverb_speech'
-    reverb_dir.mkdir(parents=True, exist_ok=True)
-
-    speech = {}
-    for path in speech_paths:
-        signal, _ = librosa.load(path, sr=sr)
-        stem = Path(path).stem
-        speech[stem] = np.asarray(signal, dtype=np.float64)
-        sf.write(reverb_dir / f'{stem}.wav', speech[stem], sr, subtype='PCM_16')
-
-    written = len(speech)
-    for metric in metrics:
-        selected = select_samples(rows, metric, per_category=1)
-        if not selected:
-            print(f'  no finite {metric} to rank on; rendered no speech for it')
-            continue
-
-        metric_dir = reverb_dir / metric
-        metric_dir.mkdir(exist_ok=True)
-        for category, indices in selected.items():
-            index = indices[0]
-            reference = np.asarray(references['references'][index], dtype=np.float64).flatten()
-            generated = np.asarray(generations['generated'][index], dtype=np.float64).flatten()
-            print(f'    {metric} {category}: {references["sample_id"][index]}')
-
-            for stem, dry in speech.items():
-                _write_pair(metric_dir, category, stem,
-                            np.convolve(dry, reference), np.convolve(dry, generated), sr)
-                written += 2
-
-    print(f'  reverb speech: {written} wav files under {reverb_dir.name}/')
-    return written
-
-
 # =============================================================================
 # Main
 # =============================================================================
@@ -457,21 +268,24 @@ def main():
     # ---------- Score ----------
     print(f'\nScoring {len(generations["sample_id"]):,} pairs'
           + (f', stopping at {args.limit:,}' if args.limit else ''))
-    rows = score_split(generations, references, sr, dry_signal, args.octave_bands,
-                       tuple(args.t60_fit_range), limit=args.limit, workers=args.workers)
+    tasks, identities = build_tasks(generations, references, args.limit)
+    rows = score_rows(tasks, identities, sr, dry_signal, args.octave_bands,
+                      tuple(args.t60_fit_range), workers=args.workers)
 
     stats = aggregate([{k: v for k, v in row.items() if k not in IDENTITY_COLUMNS} for row in rows])
     report_failures(stats, len(rows))
 
     # ---------- Write ----------
-    target_dir = resolve_output_dir(args.run_dir, tag)
+    target_dir = resolve_output_dir(Path(args.run_dir) / 'evaluation', tag)
     write_results(target_dir, rows, stats, generation_config, tag, args, len(references['sample_id']))
     print(f'\nWrote {target_dir}')
     print(f'  {METRICS_NAME}  {SUMMARY_NAME}  {CONFIG_NAME}')
 
     # ---------- Draw and render ----------
     if not args.no_plots:
-        write_figures(target_dir, rows, generations, references, sr, generation_config, tag, args)
+        write_figures(target_dir, rows, generations, references, sr,
+                      _title_base(generation_config, tag), args.plot_metrics, args.plot_samples,
+                      args.plot_max_sec, args.octave_bands, args.t60_fit_range)
     if not args.no_reverb_speech:
         write_reverb_speech(target_dir, rows, generations, references, sr,
                             args.reverb_metrics, args.speech4reverb)
