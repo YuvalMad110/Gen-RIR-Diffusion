@@ -1,4 +1,5 @@
 import os
+import gc
 import json
 import argparse
 from datetime import datetime
@@ -99,7 +100,7 @@ def parse_args():
     parser.add_argument('--random-seed', type=int, default=42)
 
     # Post-training evaluation
-    parser.add_argument('--post-train-eval', type=str2bool, default=True, help='Run full_model_eval.py on the finished run directory after training completes')
+    parser.add_argument('--post-train-eval', type=str2bool, default=True, help='Generate and score the test split once training completes')
 
     args = parser.parse_args()
 
@@ -200,21 +201,61 @@ def get_sample_size(dataloader, n_fft, hop_length):
         n_frames = rir.shape[-1] // hop_length + 1
         return torch.Size([n_freq, n_frames])
 
-def _run_post_train_eval(model_dir: str, batch_size: int) -> None:
-    """Launch full_model_eval.py as a subprocess after training completes."""
+# =============================================================================
+# Post-training evaluation
+# =============================================================================
+
+# The sampler every run is generated and scored with, matching the golden run
+POST_TRAIN_EVAL_SAMPLER = {'num_inference_steps': 200, 'guidance_scale': 2.0, 'seed': 42}
+
+# Generation carries no gradients, so it takes this multiple of the training batch size
+POST_TRAIN_EVAL_BATCH_FACTOR = 2
+
+
+def _release_training_memory(accelerator, trainer) -> float:
+    """Release the GPU memory training held and return what stays reserved, in GiB."""
+    accelerator.free_memory(trainer.model, trainer.optimizer)
+    trainer.model = trainer.optimizer = None
+    gc.collect()
+    if not torch.cuda.is_available():
+        return 0.0
+    torch.cuda.empty_cache()
+    return torch.cuda.memory_reserved() / 1024 ** 3
+
+
+def _run_post_train_eval(model_dir: str, train_batch_size: int, accelerator, trainer) -> None:
+    """Generate the test split and score it, on the device training just finished with."""
     import subprocess
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    eval_script = os.path.join(project_root, 'evaluation', 'full_model_eval.py')
-    cmd = [
-        'python3', eval_script,
-        '--model_dir', model_dir,
-        '--batch_size', str(batch_size),
+
+    evaluation_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'evaluation')
+    sampler = POST_TRAIN_EVAL_SAMPLER
+    commands = [
+        ['python3', os.path.join(evaluation_dir, 'pre_generate.py'),
+         '--run-dir', model_dir, '--use-ddim',
+         '--num-inference-steps', str(sampler['num_inference_steps']),
+         '--guidance-scale', str(sampler['guidance_scale']),
+         '--seed', str(sampler['seed']),
+         '--batch-size', str(train_batch_size * POST_TRAIN_EVAL_BATCH_FACTOR)],
+        ['python3', os.path.join(evaluation_dir, 'run_evaluation.py'), '--run-dir', model_dir],
     ]
-    print(f"\n---------- Post-training evaluation: {' '.join(cmd)} ----------\n")
-    subprocess.run(cmd, check=False)
+
+    reserved = _release_training_memory(accelerator, trainer)
+    print(f'\n---------- Post-training evaluation: {reserved:.2f} GiB reserved after release ----------')
+
+    for index, command in enumerate(commands):
+        print(f"\n---------- {' '.join(command)} ----------\n")
+        if subprocess.run(command, check=False).returncode == 0:
+            continue
+        print('\n---------- Evaluation failed; training finished and is saved. Run: ----------')
+        for remaining in commands[index:]:
+            print('  ' + ' '.join(remaining))
+        return
 
 
-# ------------------------- Main --------------------------
+# =============================================================================
+# Main
+# =============================================================================
+
 def main():
     started_at = datetime.now()   # inputs written after this are flagged in run_config
     args = parse_args()
@@ -342,7 +383,8 @@ def main():
         print('\n---------- Training finished successfully!! ----------\n')
 
         if args.post_train_eval:
-            _run_post_train_eval(model_path, args.batch_size)
+            model = None   # the last reference main holds, so the GPU can be released
+            _run_post_train_eval(model_path, args.batch_size, accelerator, trainer)
 
     # ---------- Distroy Process Group ----------
     # Wait for main process to finish saving files

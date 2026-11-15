@@ -128,7 +128,7 @@ class DiffusionTrainer():
             # final log
             total_elapsed_time = datetime.timedelta(seconds=int(time.time() - train_start_time))
             final_msg = f"""###########\nTraining finished successfully after {total_elapsed_time}
-                         Best model saved at epoch {best_model_dict['epoch']} with train loss {best_loss:.4f}\n
+                         Best model saved at epoch {best_model_dict['epoch']} with eval loss {best_loss:.4f}\n
                          save path: {new_logdir}\n###########"""
             logging.info(final_msg)
             print(final_msg)
