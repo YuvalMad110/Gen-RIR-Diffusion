@@ -9,7 +9,7 @@ import shutil
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from utils.misc import save_metric, get_timestamped_logdir, plot_signals
-from utils.signal_proc import waveform_to_spectrogram
+from utils.signal_proc import batch_edc_error, spectrogram_to_waveform, unscale_rir, waveform_to_spectrogram
 from utils.dataset_utils import build_condition_tensor
 from tqdm import tqdm
 from diffusers import DDPMScheduler
@@ -38,6 +38,8 @@ class DiffusionTrainer():
                  src_trgt_dist_cond=False,
                  sr=None,
                  loss_weighting=None,
+                 edc_loss=None,
+                 scale_rir=False,
                  patience=15):
         # -------- Cfg --------
         self.model = model
@@ -57,6 +59,8 @@ class DiffusionTrainer():
         self.src_trgt_dist_cond = src_trgt_dist_cond
         self.sr = sr
         self.loss_weighting = loss_weighting
+        self.edc_loss = edc_loss
+        self.scale_rir = scale_rir
         # Setup Accelerator for DDP/AMP
         self.accelerator = accelerator
         if self.accelerator.is_main_process:
@@ -190,8 +194,100 @@ class DiffusionTrainer():
 
         return epoch_loss, epoch_norm_loss
 
-    def _compute_loss(self, noise_pred, noise, batch):
-        """Compute training loss, optionally weighted by a per-sample RIR decay mask."""
+    def _compute_loss(self, noise_pred, noise, batch, noisy_rirs, timesteps):
+        """The training objective: the noise loss, plus the decay-curve term when configured.
+
+        Args:
+            noise_pred: Predicted noise [batch, 2, freq, frame]
+            noise:      The noise that was added [batch, 2, freq, frame]
+            batch:      The collated batch
+            noisy_rirs: The spectrogram the prediction was made from [batch, 2, freq, frame]
+            timesteps:  Diffusion timestep per sample [batch]
+
+        Returns:
+            The scalar the backward pass runs on.
+        """
+        loss = self._noise_loss(noise_pred, noise, batch)
+        if self.edc_loss is not None:
+            loss = loss + self.edc_loss['weight'] * self._edc_term(noise_pred, noisy_rirs, timesteps, batch)
+        return loss
+
+    def _denoised_waveforms(self, noise_pred, noisy_rirs, timesteps, batch):
+        """The waveform the noise estimate implies and the batch's own, at their natural decay.
+
+        The prediction is the clean spectrogram the model's noise estimate implies, brought back to
+        the time domain and, when training scales the RIRs, returned to its natural decay. The
+        reference is the batch's own waveform under the same treatment, so both sides are measured
+        the same way. Both are cut to the length they share.
+
+        Args:
+            noise_pred: Predicted noise [batch, 2, freq, frame]
+            noisy_rirs: The spectrogram the prediction was made from [batch, 2, freq, frame]
+            timesteps:  Diffusion timestep per sample [batch]
+            batch:      The collated batch, supplying 'rir' and, when scaling, 'rt60'
+
+        Returns:
+            (predicted, reference, alphas): the two waveforms [batch, time] and the scheduler's
+            cumulative signal coefficient at each sample's timestep [batch].
+        """
+        device = noise_pred.device
+        alphas = self.noise_scheduler.alphas_cumprod.to(device)[timesteps]         # [batch]
+
+        shaped    = alphas.view(-1, 1, 1, 1)
+        denoised  = (noisy_rirs.float() - (1 - shaped).sqrt() * noise_pred.float()) / shaped.sqrt()
+        predicted = spectrogram_to_waveform(denoised, hop_length=self.hop_length, n_fft=self.n_fft)
+        reference = batch['rir'].to(device).float()                                # [batch, time]
+
+        length    = min(predicted.shape[-1], reference.shape[-1])
+        predicted, reference = predicted[..., :length], reference[..., :length]
+
+        if self.scale_rir:
+            rt60      = batch['rt60'].to(device)
+            predicted = unscale_rir(predicted, self.sr, rt60)
+            reference = unscale_rir(reference, self.sr, rt60)
+
+        return predicted, reference, alphas
+
+    def _timestep_weight(self, alphas, min_snr_gamma, keep):
+        """min(SNR(t), min_snr_gamma) over the kept samples.
+
+        This is the factor that gives a quantity read off the clean signal the balance across
+        timesteps that the noise loss has by construction.
+        """
+        return (alphas / (1 - alphas)).clamp(max=min_snr_gamma)[keep]
+
+    def _edc_term(self, noise_pred, noisy_rirs, timesteps, batch):
+        """Squared error between the predicted and the reference energy decay curve.
+
+        Both curves start at their own signal's peak and are normalised by the energy of the window
+        they share, so the term reads decay shape alone and carries no absolute gain. The error is
+        in dB^2 or dimensionless according to the configured form.
+
+        Args:
+            noise_pred: Predicted noise [batch, 2, freq, frame]
+            noisy_rirs: The spectrogram the prediction was made from [batch, 2, freq, frame]
+            timesteps:  Diffusion timestep per sample [batch]
+            batch:      The collated batch, supplying 'rir' and, when scaling, 'rt60'
+
+        Returns:
+            Weighted mean squared decay-curve error, a scalar. Zero when no sample in the batch
+            carries a long enough shared window on both sides.
+        """
+        predicted, reference, alphas = self._denoised_waveforms(noise_pred, noisy_rirs, timesteps, batch)
+
+        error, keep = batch_edc_error(predicted, reference, self.sr, form=self.edc_loss['form'],
+                                      floor_db=self.edc_loss.get('floor_db'),
+                                      min_post_peak_ms=self.edc_loss['min_post_peak_ms'],
+                                      energy_floor=self.edc_loss['energy_floor'])
+        if not bool(keep.any()):
+            return noise_pred.new_zeros(())
+
+        weight = self._timestep_weight(alphas, self.edc_loss['min_snr_gamma'], keep)
+        return (weight * error[keep]).sum() / weight.sum()
+
+    def _noise_loss(self, noise_pred, noise, batch):
+        """Error between the predicted and the added noise, optionally weighted by a per-sample
+        RIR decay mask."""
         if self.loss_weighting is None or self.loss_weighting['method'] == 'none':
             return F.mse_loss(noise_pred, noise)
 
@@ -244,14 +340,14 @@ class DiffusionTrainer():
         if self.use_amp:
             with autocast("cuda"):
                 noise_pred = self.model(noisy_rirs, timesteps, condition, images=images)["sample"]
-                loss = self._compute_loss(noise_pred, noise, batch)
+                loss = self._compute_loss(noise_pred, noise, batch, noisy_rirs, timesteps)
             if training:
                 scaler.scale(loss).backward()
                 scaler.step(self.optimizer)
                 scaler.update()
         else:
             noise_pred = self.model(noisy_rirs, timesteps, condition, images=images)["sample"]
-            loss = self._compute_loss(noise_pred, noise, batch)
+            loss = self._compute_loss(noise_pred, noise, batch, noisy_rirs, timesteps)
             if training:
                 loss.backward()
                 self.optimizer.step()

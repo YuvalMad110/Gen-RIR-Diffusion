@@ -76,7 +76,7 @@ def parse_args():
 
     # Audio / spectrogram — all four default to the scene dataset's values
     parser.add_argument('--sr-target', type=int, default=None, help='Target sampling rate')
-    parser.add_argument('--sample-max-sec', type=float, default=None, help='Max RIR length in seconds')
+    parser.add_argument('--sample-max-sec', type=float, default=0.6, help='Max RIR length in seconds')
     parser.add_argument('--n-fft', type=int, default=None)
     parser.add_argument('--hop-length', type=int, default=None)
 
@@ -126,12 +126,52 @@ def parse_args():
         parser.error(f'--eval-freq {args.eval_freq} over --epochs {args.epochs} never runs an evaluation pass.')
     return args
 
+# Settings of the decay-curve loss term that the config may leave out, per error form.
+EDC_LOSS_DEFAULTS = {
+    'db':     {'weight': 1.58e-4, 'floor_db': 30.0, 'min_snr_gamma': 5.0, 'min_post_peak_ms': 250.0, 'energy_floor': 1e-20},
+    'linear': {'weight': 3.28, 'min_snr_gamma': 5.0, 'min_post_peak_ms': 250.0, 'energy_floor': 1e-20},
+}
+
+
+def resolve_edc_loss(edc_loss):
+    """The decay-curve loss settings with the omitted ones filled in from the chosen form.
+
+    Args:
+        edc_loss: The config's edc_loss value, or None when the term is off
+
+    Returns:
+        A dict carrying form, weight and the form's own settings, or None. Raises when the form is
+        not one of EDC_LOSS_DEFAULTS, a key is not one that form reads, or the weight is neither
+        given nor yet measured for that form.
+    """
+    if edc_loss is None:
+        return None
+    form = edc_loss.get('form', 'db')
+    if form not in EDC_LOSS_DEFAULTS:
+        raise ValueError(f"Unknown edc_loss form '{form}'; expected one of {sorted(EDC_LOSS_DEFAULTS)}")
+
+    defaults = EDC_LOSS_DEFAULTS[form]
+    unknown  = set(edc_loss) - set(defaults) - {'form'}
+    if unknown:
+        raise ValueError(f"Unknown edc_loss keys for form '{form}': {sorted(unknown)}; "
+                         f"expected 'form' and any of {sorted(defaults)}")
+
+    resolved = {**defaults, **edc_loss, 'form': form}
+    if resolved['weight'] is None:
+        raise ValueError(f"edc_loss form '{form}' carries no measured default weight; set 'weight' "
+                         f"from debug/edc_weight_probe.py")
+    return resolved
+
+
 def load_model_config(config_path, use_rt60_condition=False):
-    """Load and prepare model config. Returns (model_config, ie_config, src_trgt_dist_cond).
+    """Load and prepare model config.
 
     Pops image_encoder_config into ie_config, converts image_size to tuple,
     and extracts src_trgt_dist_cond (consumed here to compute input_cond_dim;
     not a RIRDiffusionModel parameter).
+
+    Returns:
+        (model_config, ie_config, src_trgt_dist_cond, loss_weighting, edc_loss)
     """
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Model configuration file not found: {config_path}")
@@ -149,7 +189,8 @@ def load_model_config(config_path, use_rt60_condition=False):
     loss_weighting = model_config.pop('loss_weighting', None)
     if loss_weighting is not None and loss_weighting.get('method') == 'rt60_binary' and not use_rt60_condition:
         raise ValueError("loss_weighting 'rt60_binary' requires use_rt60_condition=True (batch['rt60'] must be present)")
-    return model_config, ie_config, src_trgt_dist_cond, loss_weighting
+    edc_loss = resolve_edc_loss(model_config.pop('edc_loss', None))
+    return model_config, ie_config, src_trgt_dist_cond, loss_weighting, edc_loss
 
 def num_workers_test(dataset, nWorkers=[0,1,4,8,10, 12, 14, 16,18], batch_size=16):
     """
@@ -274,7 +315,7 @@ def main():
 
     # ---------- Model config ----------
     args.model_config = str(get_full_path(args.model_config, "config"))
-    model_config, ie_config, src_trgt_dist_cond, loss_weighting = load_model_config(args.model_config, args.use_rt60_condition)
+    model_config, ie_config, src_trgt_dist_cond, loss_weighting, edc_loss = load_model_config(args.model_config, args.use_rt60_condition)
 
     # ---------- Load datasets ----------
     print("\n----------- Loading datasets... -----------\n")
@@ -331,6 +372,7 @@ def main():
     )
     model.config['src_trgt_dist_cond'] = src_trgt_dist_cond
     model.config['loss_weighting'] = loss_weighting
+    model.config['edc_loss'] = edc_loss
     print("\n---------- Initialized model ----------\n")
     
     # Scheduler 
@@ -357,6 +399,8 @@ def main():
         src_trgt_dist_cond=src_trgt_dist_cond,
         sr=args.sr_target,
         loss_weighting=loss_weighting,
+        edc_loss=edc_loss,
+        scale_rir=args.scale_rir,
     )
 
     # ---------- Train ----------

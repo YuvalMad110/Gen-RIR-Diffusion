@@ -198,6 +198,106 @@ def plot_waveform(signals, legend=None, title=None, sr=None, save_path=None):
     plt.show()
 
 # ------------------------------------------------------------------------
+#                       Energy Decay Error
+# ------------------------------------------------------------------------
+
+def _peak_anchored_energy(rir: torch.Tensor, peak: torch.Tensor,
+                          points: torch.Tensor) -> torch.Tensor:
+    """Sample energy over `points` samples from each RIR's own peak, zero outside that window.
+
+    Args:
+        rir:    Time-domain RIRs [batch, time]
+        peak:   Index of each RIR's own peak [batch]
+        points: Number of post-peak samples to keep per sample [batch]
+
+    Returns:
+        Squared samples [batch, time], laid out from the peak at column 0.
+    """
+    width    = rir.shape[-1]
+    offset   = torch.arange(width, device=rir.device)                         # [time]
+    index    = peak.unsqueeze(-1) + offset                                    # [batch, time]
+    inside   = (index < width) & (offset < points.unsqueeze(-1))
+    gathered = rir.gather(-1, index.clamp(max=width - 1))
+    return (gathered * inside) ** 2
+
+
+def normalised_edc(energy: torch.Tensor, energy_floor: float) -> torch.Tensor:
+    """Reverse-cumulative energy of each row, normalised so the first column is 1.
+
+    Args:
+        energy:       Squared samples [batch, time]
+        energy_floor: Lower bound on the window energy the curve is divided by
+    """
+    decay = torch.flip(torch.cumsum(torch.flip(energy, dims=[-1]), dim=-1), dims=[-1])
+    return decay / decay[..., :1].clamp_min(energy_floor)
+
+
+def batch_edc_error(predicted: torch.Tensor, reference: torch.Tensor, sr: float,
+                    form: str = 'db', floor_db: float = 30.0,
+                    min_post_peak_ms: float = 250.0,
+                    energy_floor: float = 1e-20) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Squared error between two batches of energy decay curves, differentiable in both signals.
+
+    Each curve starts at its own signal's peak and is normalised by the energy of the window it
+    covers, so both begin at 1 and the comparison carries no absolute gain. The window is the
+    post-peak stretch the two signals share, which keeps the curves the same length and keeps a
+    peak-position difference out of the band alignment. Peaks are indices and carry no gradient.
+
+    The 'db' form reads the curves in decibels, clamped at floor_db below their start. Because a
+    decay of slope -60/rt60 dB per second reaches -floor_db at time floor_db*rt60/60, the clamp
+    acts as a per-sample horizon: it ends the comparison where the decay has run that far, and it
+    bounds the logarithm's gradient. The 'linear' form compares the curves as they are, over their
+    whole length.
+
+    Args:
+        predicted:        Time-domain RIRs under test [batch, time]
+        reference:        Time-domain reference RIRs [batch, time]
+        sr:               Sample rate
+        form:             'db' for the decibel error, 'linear' for the error on the curves
+        floor_db:         Depth of the clamp below each curve's start, in dB; read by 'db' only
+        min_post_peak_ms: Shortest shared post-peak window a sample may be measured over
+        energy_floor:     Window energy below which a sample carries no curve to compare, and the
+                          lower bound on the energy each curve is normalised by
+
+    Returns:
+        (error, valid), both [batch]. error is the mean squared curve difference, in dB^2 for the
+        'db' form and dimensionless for 'linear'. valid is False where the shared window is
+        shorter than min_post_peak_ms or either signal's window energy falls to energy_floor, and
+        the error entry there has no meaning.
+    """
+    width = min(predicted.shape[-1], reference.shape[-1])
+    predicted, reference = predicted[..., :width], reference[..., :width]
+
+    predicted_peak = predicted.abs().argmax(dim=-1)                           # [batch]
+    reference_peak = reference.abs().argmax(dim=-1)                           # [batch]
+    points = width - torch.maximum(predicted_peak, reference_peak)            # [batch]
+
+    predicted_energy = _peak_anchored_energy(predicted, predicted_peak, points)
+    reference_energy = _peak_anchored_energy(reference, reference_peak, points)
+    predicted_edc    = normalised_edc(predicted_energy, energy_floor)         # [batch, time]
+    reference_edc    = normalised_edc(reference_energy, energy_floor)
+
+    if form == 'db':
+        floor      = 10.0 ** (-floor_db / 10.0)
+        difference = 10.0 * (predicted_edc.clamp_min(floor).log10()
+                             - reference_edc.clamp_min(floor).log10())
+    elif form == 'linear':
+        difference = predicted_edc - reference_edc
+    else:
+        raise ValueError(f"Unknown EDC error form '{form}'; expected 'db' or 'linear'")
+
+    offset = torch.arange(width, device=predicted.device)                     # [time]
+    inside = offset < points.unsqueeze(-1)                                    # [batch, time]
+    error  = ((difference ** 2) * inside).sum(dim=-1) / points.clamp_min(1)
+
+    valid = ((points >= int(min_post_peak_ms * sr / 1000))
+             & (predicted_energy.sum(dim=-1) > energy_floor)
+             & (reference_energy.sum(dim=-1) > energy_floor))
+    return error, valid
+
+
+# ------------------------------------------------------------------------
 #                       Signal Scaling
 # ------------------------------------------------------------------------
 def calculate_edc(rir: torch.Tensor) -> torch.Tensor:
