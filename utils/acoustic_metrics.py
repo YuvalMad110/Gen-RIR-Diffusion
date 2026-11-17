@@ -20,6 +20,7 @@ import warnings
 
 DEFAULT_T60_FIT_RANGE: Tuple[float, float] = (-15, -40)
 DEFAULT_OCTAVE_BANDS: List[float] = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0]
+ENERGY_FLOOR: float = np.finfo(float).eps # The smallest energy the metrics treat as non-zero; below it the signal counts as silent
 
 
 # =============================================================================
@@ -45,8 +46,7 @@ def compute_edc(rir: np.ndarray, sr: int = None) -> np.ndarray:
     squared = rir ** 2
     edc = np.cumsum(squared[::-1])[::-1]
     
-    # Avoid log(0)
-    edc = np.maximum(edc, np.finfo(float).eps)
+    edc = np.maximum(edc, ENERGY_FLOOR)
     
     # Convert to dB, normalize to 0 at start
     edc_db = 10 * np.log10(edc / edc[0])
@@ -358,7 +358,7 @@ def compute_drr(rir: np.ndarray, sr: int, direct_window_ms: float = 2.5) -> floa
     e_direct = np.sum(rir[start_idx:end_idx] ** 2)
     e_reverb = np.sum(rir[end_idx:] ** 2)
     
-    if e_reverb < np.finfo(float).eps:
+    if e_reverb < ENERGY_FLOOR:
         return np.inf
     
     drr = 10 * np.log10(e_direct / e_reverb)
@@ -431,7 +431,7 @@ def compute_clarity(rir: np.ndarray, sr: int, time_ms: float = 50) -> float:
     e_early = np.sum(rir[direct_idx:cutoff_idx] ** 2)
     e_late = np.sum(rir[cutoff_idx:] ** 2)
     
-    if e_late < np.finfo(float).eps:
+    if e_late < ENERGY_FLOOR:
         return np.inf
     
     clarity = 10 * np.log10(e_early / e_late)
