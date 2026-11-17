@@ -198,6 +198,55 @@ def plot_waveform(signals, legend=None, title=None, sr=None, save_path=None):
     plt.show()
 
 # ------------------------------------------------------------------------
+#                       Clarity
+# ------------------------------------------------------------------------
+
+# The late energy below which clarity is undefined, matching acoustic_metrics.ENERGY_FLOOR
+_LATE_ENERGY_FLOOR = torch.finfo(torch.float64).eps
+
+
+def batch_c50(rir: torch.Tensor, sr: float, time_ms: float = 50.0,
+              eps: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Clarity index of a batch of RIRs, in dB, differentiable in the signal.
+
+    The early window runs from each RIR's own peak to time_ms after it and the late window
+    covers the rest of the signal, which is how utils/acoustic_metrics.compute_clarity places
+    them, so both return the same value for the same waveform. The peak is an index and carries
+    no gradient; the gradient reaches the signal through the two energy sums alone.
+
+    Args:
+        rir:     Time-domain RIRs [batch, time]
+        sr:      Sample rate
+        time_ms: Length of the early window in milliseconds, measured from the peak
+        eps:     Added to both energies before the log, which bounds the gradient where either
+                 of them approaches zero. At 0.0 the returned values match the metric exactly.
+
+    Returns:
+        (c50, valid), both [batch]. c50 is in dB. valid is False where the early window runs
+        past the end of the signal or the late energy vanishes — the cases the metric reports
+        as infinite — and the c50 entry there carries no meaning.
+    """
+    n_samples      = rir.shape[-1]
+    cutoff_samples = int(time_ms * sr / 1000)
+
+    direct_idx = rir.abs().argmax(dim=-1)                                     # [batch]
+    cutoff_idx = direct_idx + cutoff_samples                                  # [batch]
+
+    position = torch.arange(n_samples, device=rir.device)                     # [time]
+    early    = (position >= direct_idx.unsqueeze(-1)) & (position < cutoff_idx.unsqueeze(-1))
+    late     = position >= cutoff_idx.unsqueeze(-1)                           # [batch, time]
+
+    energy  = rir ** 2
+    e_early = (energy * early).sum(dim=-1)                                    # [batch]
+    e_late  = (energy * late).sum(dim=-1)                                     # [batch]
+
+    valid = (cutoff_idx < n_samples) & (e_late >= _LATE_ENERGY_FLOOR)
+    c50   = 10.0 * torch.log10((e_early + eps) / (e_late + eps))
+    return c50, valid
+
+
+# ------------------------------------------------------------------------
 #                       Energy Decay Error
 # ------------------------------------------------------------------------
 

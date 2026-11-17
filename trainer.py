@@ -9,7 +9,7 @@ import shutil
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from utils.misc import save_metric, get_timestamped_logdir, plot_signals
-from utils.signal_proc import batch_edc_error, spectrogram_to_waveform, unscale_rir, waveform_to_spectrogram
+from utils.signal_proc import batch_c50, batch_edc_error, spectrogram_to_waveform, unscale_rir, waveform_to_spectrogram
 from utils.dataset_utils import build_condition_tensor
 from tqdm import tqdm
 from diffusers import DDPMScheduler
@@ -38,6 +38,7 @@ class DiffusionTrainer():
                  src_trgt_dist_cond=False,
                  sr=None,
                  loss_weighting=None,
+                 c50_loss=None,
                  edc_loss=None,
                  scale_rir=False,
                  patience=15):
@@ -59,6 +60,7 @@ class DiffusionTrainer():
         self.src_trgt_dist_cond = src_trgt_dist_cond
         self.sr = sr
         self.loss_weighting = loss_weighting
+        self.c50_loss = c50_loss
         self.edc_loss = edc_loss
         self.scale_rir = scale_rir
         # Setup Accelerator for DDP/AMP
@@ -195,7 +197,8 @@ class DiffusionTrainer():
         return epoch_loss, epoch_norm_loss
 
     def _compute_loss(self, noise_pred, noise, batch, noisy_rirs, timesteps):
-        """The training objective: the noise loss, plus the decay-curve term when configured.
+        """The training objective: the noise loss, plus whichever of the clarity and decay-curve
+        terms are configured.
 
         Args:
             noise_pred: Predicted noise [batch, 2, freq, frame]
@@ -208,6 +211,8 @@ class DiffusionTrainer():
             The scalar the backward pass runs on.
         """
         loss = self._noise_loss(noise_pred, noise, batch)
+        if self.c50_loss is not None:
+            loss = loss + self.c50_loss['weight'] * self._c50_term(noise_pred, noisy_rirs, timesteps, batch)
         if self.edc_loss is not None:
             loss = loss + self.edc_loss['weight'] * self._edc_term(noise_pred, noisy_rirs, timesteps, batch)
         return loss
@@ -255,6 +260,33 @@ class DiffusionTrainer():
         timesteps that the noise loss has by construction.
         """
         return (alphas / (1 - alphas)).clamp(max=min_snr_gamma)[keep]
+
+    def _c50_term(self, noise_pred, noisy_rirs, timesteps, batch):
+        """Mean absolute clarity error between the predicted and the reference RIR, in dB.
+
+        Args:
+            noise_pred: Predicted noise [batch, 2, freq, frame]
+            noisy_rirs: The spectrogram the prediction was made from [batch, 2, freq, frame]
+            timesteps:  Diffusion timestep per sample [batch]
+            batch:      The collated batch, supplying 'rir' and, when scaling, 'rt60'
+
+        Returns:
+            Weighted mean absolute clarity error in dB, a scalar. Zero when no sample in the batch
+            carries a defined clarity on both sides.
+        """
+        predicted, reference, alphas = self._denoised_waveforms(noise_pred, noisy_rirs, timesteps, batch)
+
+        eps = self.c50_loss['eps']
+        predicted_c50, predicted_valid = batch_c50(predicted, self.sr, eps=eps)
+        reference_c50, reference_valid = batch_c50(reference, self.sr, eps=eps)
+
+        keep = predicted_valid & reference_valid
+        if not bool(keep.any()):
+            return noise_pred.new_zeros(())
+
+        weight = self._timestep_weight(alphas, self.c50_loss['min_snr_gamma'], keep)
+        error  = (predicted_c50 - reference_c50).abs()[keep]
+        return (weight * error).sum() / weight.sum()
 
     def _edc_term(self, noise_pred, noisy_rirs, timesteps, batch):
         """Squared error between the predicted and the reference energy decay curve.

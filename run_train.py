@@ -126,6 +126,31 @@ def parse_args():
         parser.error(f'--eval-freq {args.eval_freq} over --epochs {args.epochs} never runs an evaluation pass.')
     return args
 
+# Settings of the clarity loss term that the config may leave out; 'weight' has no default
+C50_LOSS_DEFAULTS = {'min_snr_gamma': 5.0, 'eps': 1e-10}
+
+
+def resolve_c50_loss(c50_loss):
+    """The clarity loss settings with the omitted ones filled in.
+
+    Args:
+        c50_loss: The config's c50_loss value, or None when the term is off
+
+    Returns:
+        A dict carrying weight, min_snr_gamma and eps, or None. Raises when 'weight' is missing
+        or a key is not one the trainer reads.
+    """
+    if c50_loss is None:
+        return None
+    unknown = set(c50_loss) - set(C50_LOSS_DEFAULTS) - {'weight'}
+    if unknown:
+        raise ValueError(f"Unknown c50_loss keys: {sorted(unknown)}; "
+                         f"expected 'weight' and any of {sorted(C50_LOSS_DEFAULTS)}")
+    if 'weight' not in c50_loss:
+        raise ValueError("c50_loss requires 'weight', the factor the clarity term enters the loss with")
+    return {**C50_LOSS_DEFAULTS, **c50_loss}
+
+
 # Settings of the decay-curve loss term that the config may leave out, per error form.
 EDC_LOSS_DEFAULTS = {
     'db':     {'weight': 1.58e-4, 'floor_db': 30.0, 'min_snr_gamma': 5.0, 'min_post_peak_ms': 250.0, 'energy_floor': 1e-20},
@@ -171,7 +196,7 @@ def load_model_config(config_path, use_rt60_condition=False):
     not a RIRDiffusionModel parameter).
 
     Returns:
-        (model_config, ie_config, src_trgt_dist_cond, loss_weighting, edc_loss)
+        (model_config, ie_config, src_trgt_dist_cond, loss_weighting, c50_loss, edc_loss)
     """
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Model configuration file not found: {config_path}")
@@ -189,8 +214,9 @@ def load_model_config(config_path, use_rt60_condition=False):
     loss_weighting = model_config.pop('loss_weighting', None)
     if loss_weighting is not None and loss_weighting.get('method') == 'rt60_binary' and not use_rt60_condition:
         raise ValueError("loss_weighting 'rt60_binary' requires use_rt60_condition=True (batch['rt60'] must be present)")
+    c50_loss = resolve_c50_loss(model_config.pop('c50_loss', None))
     edc_loss = resolve_edc_loss(model_config.pop('edc_loss', None))
-    return model_config, ie_config, src_trgt_dist_cond, loss_weighting, edc_loss
+    return model_config, ie_config, src_trgt_dist_cond, loss_weighting, c50_loss, edc_loss
 
 def num_workers_test(dataset, nWorkers=[0,1,4,8,10, 12, 14, 16,18], batch_size=16):
     """
@@ -315,7 +341,7 @@ def main():
 
     # ---------- Model config ----------
     args.model_config = str(get_full_path(args.model_config, "config"))
-    model_config, ie_config, src_trgt_dist_cond, loss_weighting, edc_loss = load_model_config(args.model_config, args.use_rt60_condition)
+    model_config, ie_config, src_trgt_dist_cond, loss_weighting, c50_loss, edc_loss = load_model_config(args.model_config, args.use_rt60_condition)
 
     # ---------- Load datasets ----------
     print("\n----------- Loading datasets... -----------\n")
@@ -372,6 +398,7 @@ def main():
     )
     model.config['src_trgt_dist_cond'] = src_trgt_dist_cond
     model.config['loss_weighting'] = loss_weighting
+    model.config['c50_loss'] = c50_loss
     model.config['edc_loss'] = edc_loss
     print("\n---------- Initialized model ----------\n")
     
@@ -399,6 +426,7 @@ def main():
         src_trgt_dist_cond=src_trgt_dist_cond,
         sr=args.sr_target,
         loss_weighting=loss_weighting,
+        c50_loss=c50_loss,
         edc_loss=edc_loss,
         scale_rir=args.scale_rir,
     )
