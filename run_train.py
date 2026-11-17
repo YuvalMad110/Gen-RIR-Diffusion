@@ -37,7 +37,11 @@ CUDA_VISIBLE_DEVICES=1 python3 ./Projects/Gen-RIR-Diffusion/run_train.py \
     --scene-dataset matterport3d --model-config model_config_VisualCond_MP3D.json
 """
 
-# ------------------------- Utils --------------------------
+
+# =============================================================================
+# Command line
+# =============================================================================
+
 def parse_args():
     parser = argparse.ArgumentParser()
     # Model configuration
@@ -126,6 +130,43 @@ def parse_args():
         parser.error(f'--eval-freq {args.eval_freq} over --epochs {args.epochs} never runs an evaluation pass.')
     return args
 
+
+# =============================================================================
+# Model configuration
+# =============================================================================
+
+def load_model_config(config_path, use_rt60_condition=False):
+    """Load and prepare model config.
+
+    Pops image_encoder_config into ie_config, converts image_size to tuple,
+    and extracts src_trgt_dist_cond (consumed here to compute input_cond_dim;
+    not a RIRDiffusionModel parameter).
+
+    Returns:
+        (model_config, ie_config, src_trgt_dist_cond, loss_weighting, c50_loss, edc_loss)
+    """
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Model configuration file not found: {config_path}")
+    with open(config_path) as f:
+        model_config = json.load(f)
+    # Strip comment keys (any key starting with "_" is treated as a comment)
+    model_config = {k: v for k, v in model_config.items() if not k.startswith('_')}
+    # input_cond_dim: base 9-dim + 1 for RT60 if enabled; +1 if src_trgt_dist_cond
+    src_trgt_dist_cond = model_config.pop('src_trgt_dist_cond')
+    base_dim = 10 if use_rt60_condition else 9
+    model_config['input_cond_dim'] = base_dim + (1 if src_trgt_dist_cond else 0)
+    ie_config = model_config.pop('image_encoder_config', None)
+    if ie_config and 'image_size' in ie_config:
+        ie_config['image_size'] = tuple(ie_config['image_size'])
+    loss_weighting = model_config.pop('loss_weighting', None)
+    if loss_weighting is not None and loss_weighting.get('method') == 'rt60_binary' and not use_rt60_condition:
+        raise ValueError("loss_weighting 'rt60_binary' requires use_rt60_condition=True (batch['rt60'] must be present)")
+    c50_loss = resolve_c50_loss(model_config.pop('c50_loss', None))
+    edc_loss = resolve_edc_loss(model_config.pop('edc_loss', None))
+    return model_config, ie_config, src_trgt_dist_cond, loss_weighting, c50_loss, edc_loss
+
+
+# ---------- Clarity term ----------
 # Settings of the clarity loss term that the config may leave out; 'weight' has no default
 C50_LOSS_DEFAULTS = {'min_snr_gamma': 5.0, 'eps': 1e-10}
 
@@ -151,6 +192,7 @@ def resolve_c50_loss(c50_loss):
     return {**C50_LOSS_DEFAULTS, **c50_loss}
 
 
+# ---------- Decay-curve term ----------
 # Settings of the decay-curve loss term that the config may leave out, per error form.
 EDC_LOSS_DEFAULTS = {
     'db':     {'weight': 1.58e-4, 'floor_db': 30.0, 'min_snr_gamma': 5.0, 'min_post_peak_ms': 250.0, 'energy_floor': 1e-20},
@@ -188,35 +230,9 @@ def resolve_edc_loss(edc_loss):
     return resolved
 
 
-def load_model_config(config_path, use_rt60_condition=False):
-    """Load and prepare model config.
-
-    Pops image_encoder_config into ie_config, converts image_size to tuple,
-    and extracts src_trgt_dist_cond (consumed here to compute input_cond_dim;
-    not a RIRDiffusionModel parameter).
-
-    Returns:
-        (model_config, ie_config, src_trgt_dist_cond, loss_weighting, c50_loss, edc_loss)
-    """
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Model configuration file not found: {config_path}")
-    with open(config_path) as f:
-        model_config = json.load(f)
-    # Strip comment keys (any key starting with "_" is treated as a comment)
-    model_config = {k: v for k, v in model_config.items() if not k.startswith('_')}
-    # input_cond_dim: base 9-dim + 1 for RT60 if enabled; +1 if src_trgt_dist_cond
-    src_trgt_dist_cond = model_config.pop('src_trgt_dist_cond')
-    base_dim = 10 if use_rt60_condition else 9
-    model_config['input_cond_dim'] = base_dim + (1 if src_trgt_dist_cond else 0)
-    ie_config = model_config.pop('image_encoder_config', None)
-    if ie_config and 'image_size' in ie_config:
-        ie_config['image_size'] = tuple(ie_config['image_size'])
-    loss_weighting = model_config.pop('loss_weighting', None)
-    if loss_weighting is not None and loss_weighting.get('method') == 'rt60_binary' and not use_rt60_condition:
-        raise ValueError("loss_weighting 'rt60_binary' requires use_rt60_condition=True (batch['rt60'] must be present)")
-    c50_loss = resolve_c50_loss(model_config.pop('c50_loss', None))
-    edc_loss = resolve_edc_loss(model_config.pop('edc_loss', None))
-    return model_config, ie_config, src_trgt_dist_cond, loss_weighting, c50_loss, edc_loss
+# =============================================================================
+# Diagnostics
+# =============================================================================
 
 def num_workers_test(dataset, nWorkers=[0,1,4,8,10, 12, 14, 16,18], batch_size=16):
     """
@@ -241,6 +257,9 @@ def num_workers_test(dataset, nWorkers=[0,1,4,8,10, 12, 14, 16,18], batch_size=1
         print(f"Number of workers: {nWorker}, Time taken: {elapsed_time:.2f} seconds")
 
 
+# =============================================================================
+# Data loading
+# =============================================================================
 
 def make_train_dataloader(dataset, args, collate_fn):
     """Build the training DataLoader, using EpochSubsetSampler when nSamples is set."""
@@ -267,6 +286,7 @@ def get_sample_size(dataloader, n_fft, hop_length):
         n_freq = n_fft // 2 + 1
         n_frames = rir.shape[-1] // hop_length + 1
         return torch.Size([n_freq, n_frames])
+
 
 # =============================================================================
 # Post-training evaluation
