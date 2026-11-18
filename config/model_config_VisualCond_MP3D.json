@@ -1,4 +1,10 @@
 {
+  "_section_signal": "RIR Representation",
+  "rir_domain": "spectrogram",
+  "rir_gain": 1.0,
+  "_rir_domain": "The signal the model diffuses on: 'spectrogram' for the two-channel STFT, 'waveform' for the raw 1 x T signal. It sets in_channels, out_channels and sample_size, so it must be recorded for inference.",
+  "_rir_gain": "x_0 is multiplied by this before noising and divided by it after denoising, so the schedule sees a standard deviation near 1. 1.0 leaves the amplitude as the collate produced it, which is correct for the spectrogram at sigma 0.50.",
+
   "_section_unet": "UNet Architecture",
   "block_out_channels": [32, 64, 128],
   "layers_per_block": 2,
@@ -46,6 +52,30 @@
   "_loss_weighting": [
     "Off deliberately. 'rt60_binary' zeroes the loss for every frame after the RIR has faded by db_threshold, so the model gets no gradient from the tail — the same thing --apply-zero-tail does to the signal, which we stopped doing so the tail would be learned rather than deleted.",
     "Worth trying once a no-mask baseline exists. Its cutoff is rt60 * |db_threshold| / 60, which assumes a straight decay and reads the stored rt60; since every fit window under-reads by 10-30%, the cutoff lands earlier than the threshold implies."
+  ],
+
+  "_section_c50_loss": "Clarity Loss Term (training only; off if the key is omitted or set to null)",
+  "c50_loss": null,
+  "_c50_loss": [
+    "Adds weight * |C50(prediction) - C50(reference)| in dB to the noise loss, both sides measured on the un-scaled waveform with the same estimator the evaluation uses.",
+    "weight is the only required key and is the factor the term enters the loss with. Pick it from the ratio of gradient norms against the noise loss rather than from the two loss values, which are in unrelated units.",
+    "min_snr_gamma (5.0) caps the per-sample weight min(SNR(t), gamma). Clarity is read off the clean signal the noise estimate implies, and recovering that signal amplifies the estimate's error by sqrt(1/alpha_bar - 1), which reaches 157x at t=999; SNR(t) is the factor that undoes it, and the cap stops the lowest timesteps from taking the whole batch.",
+    "eps (1e-10) is added to both energies before the log, bounding the gradient where either approaches zero.",
+    "Example: {\"weight\": 0.05, \"min_snr_gamma\": 5.0, \"eps\": 1e-10}"
+  ],
+
+  "_section_edc_loss": "Energy Decay Curve Loss Term (training only; off if the key is omitted or set to null)",
+  "edc_loss": null,
+  "_edc_loss": [
+    "Adds weight * the mean squared difference between the predicted and the reference energy decay curve to the noise loss, both measured on the un-scaled waveform.",
+    "Each curve starts at its own signal's peak and is normalised by the energy of the post-peak window the two signals share, so the term reads decay shape alone and carries no absolute gain. The peak is an index and carries no gradient; arrival time stays the noise loss's concern.",
+    "form ('db') selects the error. 'db' reads the curves in decibels, which weights the quiet late decay the clarity and DRR metrics are made of; 'linear' compares the curves as they are, which puts most of its weight in the first 50 ms.",
+    "weight is the factor the term enters the loss with and has a default per form, since the two forms differ by orders of magnitude. Pick it from the ratio of gradient norms against the noise loss with debug/edc_weight_probe.py, never from the two loss values.",
+    "floor_db (30.0, 'db' only) clamps both curves this far below their start. A decay of slope -60/rt60 dB per second reaches -floor_db at floor_db*rt60/60 seconds, so the clamp is a per-sample horizon: it ends the comparison where the decay has run that far, and it bounds the logarithm's gradient.",
+    "min_snr_gamma (5.0) caps the per-sample weight min(SNR(t), gamma), as in c50_loss.",
+    "min_post_peak_ms (250.0) is the shortest shared post-peak window a sample may be measured over; shorter pairs sit out of the term.",
+    "energy_floor (1e-20) is the window energy below which a sample carries no curve to compare, and the lower bound on the energy each curve is normalised by.",
+    "Example: {\"form\": \"db\", \"weight\": 1e-4, \"floor_db\": 30.0}"
   ],
 
   "_Note": "Every top-level key starting with '_' is for documentation purposes and is not used in the code.",

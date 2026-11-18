@@ -9,7 +9,7 @@ import shutil
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from utils.misc import save_metric, get_timestamped_logdir, plot_signals
-from utils.signal_proc import batch_c50, batch_edc_error, spectrogram_to_waveform, unscale_rir, waveform_to_spectrogram
+from utils.signal_proc import batch_c50, batch_edc_error, model_output_to_rir, rir_to_model_input, unscale_rir
 from utils.dataset_utils import build_condition_tensor
 from tqdm import tqdm
 from diffusers import DDPMScheduler
@@ -34,6 +34,8 @@ class DiffusionTrainer():
                  accelerator=None,
                  n_fft=256,
                  hop_length=64,
+                 rir_domain='spectrogram',
+                 rir_gain=1.0,
                  run_header="",
                  src_trgt_dist_cond=False,
                  sr=None,
@@ -56,6 +58,8 @@ class DiffusionTrainer():
         self.logdir = get_timestamped_logdir('outputs/not_completed')
         self.n_fft = n_fft
         self.hop_length = hop_length
+        self.rir_domain = rir_domain
+        self.rir_gain = rir_gain
         self.run_header = run_header
         self.src_trgt_dist_cond = src_trgt_dist_cond
         self.sr = sr
@@ -201,10 +205,10 @@ class DiffusionTrainer():
         terms are configured.
 
         Args:
-            noise_pred: Predicted noise [batch, 2, freq, frame]
-            noise:      The noise that was added [batch, 2, freq, frame]
+            noise_pred: Predicted noise [batch, 1, 1, time] or [batch, 2, freq, frame]
+            noise:      The noise that was added, same shape as noise_pred
             batch:      The collated batch
-            noisy_rirs: The spectrogram the prediction was made from [batch, 2, freq, frame]
+            noisy_rirs: The model input the prediction was made from, same shape as noise_pred
             timesteps:  Diffusion timestep per sample [batch]
 
         Returns:
@@ -220,14 +224,14 @@ class DiffusionTrainer():
     def _denoised_waveforms(self, noise_pred, noisy_rirs, timesteps, batch):
         """The waveform the noise estimate implies and the batch's own, at their natural decay.
 
-        The prediction is the clean spectrogram the model's noise estimate implies, brought back to
-        the time domain and, when training scales the RIRs, returned to its natural decay. The
-        reference is the batch's own waveform under the same treatment, so both sides are measured
-        the same way. Both are cut to the length they share.
+        The prediction is the clean model input the noise estimate implies, converted back to a
+        waveform, divided by rir_gain and, when training scales the RIRs, returned to its natural
+        decay. The reference is the batch's own waveform under the same treatment, so both sides
+        are measured the same way. Both are cut to the length they share.
 
         Args:
-            noise_pred: Predicted noise [batch, 2, freq, frame]
-            noisy_rirs: The spectrogram the prediction was made from [batch, 2, freq, frame]
+            noise_pred: Predicted noise [batch, 1, 1, time] or [batch, 2, freq, frame]
+            noisy_rirs: The model input the prediction was made from, same shape as noise_pred
             timesteps:  Diffusion timestep per sample [batch]
             batch:      The collated batch, supplying 'rir' and, when scaling, 'rt60'
 
@@ -240,7 +244,7 @@ class DiffusionTrainer():
 
         shaped    = alphas.view(-1, 1, 1, 1)
         denoised  = (noisy_rirs.float() - (1 - shaped).sqrt() * noise_pred.float()) / shaped.sqrt()
-        predicted = spectrogram_to_waveform(denoised, hop_length=self.hop_length, n_fft=self.n_fft)
+        predicted = model_output_to_rir(denoised, self.rir_domain, self.hop_length, self.n_fft, self.rir_gain) # [batch, time]
         reference = batch['rir'].to(device).float()                                # [batch, time]
 
         length    = min(predicted.shape[-1], reference.shape[-1])
@@ -265,8 +269,8 @@ class DiffusionTrainer():
         """Mean absolute clarity error between the predicted and the reference RIR, in dB.
 
         Args:
-            noise_pred: Predicted noise [batch, 2, freq, frame]
-            noisy_rirs: The spectrogram the prediction was made from [batch, 2, freq, frame]
+            noise_pred: Predicted noise [batch, 1, 1, time] or [batch, 2, freq, frame]
+            noisy_rirs: The model input the prediction was made from, same shape as noise_pred
             timesteps:  Diffusion timestep per sample [batch]
             batch:      The collated batch, supplying 'rir' and, when scaling, 'rt60'
 
@@ -296,8 +300,8 @@ class DiffusionTrainer():
         in dB^2 or dimensionless according to the configured form.
 
         Args:
-            noise_pred: Predicted noise [batch, 2, freq, frame]
-            noisy_rirs: The spectrogram the prediction was made from [batch, 2, freq, frame]
+            noise_pred: Predicted noise [batch, 1, 1, time] or [batch, 2, freq, frame]
+            noisy_rirs: The model input the prediction was made from, same shape as noise_pred
             timesteps:  Diffusion timestep per sample [batch]
             batch:      The collated batch, supplying 'rir' and, when scaling, 'rt60'
 
@@ -326,10 +330,11 @@ class DiffusionTrainer():
         if self.loss_weighting['method'] == 'rt60_binary':
             rt60 = batch['rt60'].to(noise.device)                          # [B]
             alpha = abs(self.loss_weighting['db_threshold']) / 60.0
-            T = noise.shape[-1]                                            # spectrogram time frames
-            frame_rate = self.sr / self.hop_length
-            t = torch.arange(T, device=noise.device) / frame_rate         # [T] seconds
-            cutoff = (rt60 * alpha).clamp(max=T / frame_rate)             # [B]
+            T = noise.shape[-1]                                            # positions on the last axis
+            # Positions per second: samples on waveform, STFT frames on spectrogram
+            rate = self.sr if self.rir_domain == 'waveform' else self.sr / self.hop_length
+            t = torch.arange(T, device=noise.device) / rate               # [T] seconds
+            cutoff = (rt60 * alpha).clamp(max=T / rate)                   # [B]
             mask = (t.unsqueeze(0) < cutoff.unsqueeze(1)).float()         # [B, T]
             mask = mask[:, None, None, :]                                  # [B, 1, 1, T] broadcast over C, F
             sq_err = (noise_pred - noise) ** 2
@@ -340,7 +345,7 @@ class DiffusionTrainer():
     def _forward_step(self, batch, training=True, scaler=None):
         """Common forward step for training and evaluation.
 
-        batch is a dict produced by scale_and_spectrogram_collate_fn with keys:
+        batch is a dict produced by scale_collate_fn with keys:
             'rir'         — [B, T] waveform (collate scaling applied)
             'room_dim'    — [B, 3]
             'mic_loc'     — [B, 3]
@@ -349,9 +354,9 @@ class DiffusionTrainer():
             'dist'        — [B]         (when src_trgt_dist_cond=True; mic–speaker Euclidean distance)
             'images'      — [B, N, 3, H, W]  (SoundSpaces only, optional)
         """
-        # ---- prepare spectrogram ----
-        rir = batch['rir'].to(self.device)                                # [B, T]
-        rir = waveform_to_spectrogram(rir, hop_length=self.hop_length, n_fft=self.n_fft)  # [B, 2, F, T]
+        # ---- prepare the diffusion input ----
+        rir = rir_to_model_input(batch['rir'].to(self.device), self.rir_domain,
+                                 self.hop_length, self.n_fft, self.rir_gain)   # [B, 1, 1, T] or [B, 2, F, T]
 
         # ---- build scalar conditioning ----
         condition = build_condition_tensor(batch, self.device, self.src_trgt_dist_cond)

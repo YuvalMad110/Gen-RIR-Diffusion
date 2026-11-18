@@ -117,6 +117,76 @@ def spectrogram_to_waveform(spectrogram, hop_length, n_fft):
     
     return batch_waveforms
 
+def rir_to_model_input(rir, rir_domain, hop_length, n_fft, rir_gain):
+    """
+    Convert waveform(s) to the tensor the UNet diffuses on.
+
+    The waveform domain presents the RIR as a 1 x T image, which a 2D UNet consumes unchanged
+    because downsampling a height-1 axis is a no-op. The spectrogram domain takes the STFT.
+
+    Args:
+        rir:        Waveform signal(s) - shape [B, T] for batch or [T] for single
+        rir_domain: 'waveform' or 'spectrogram'
+        hop_length: Hop length for STFT, read by the spectrogram domain only
+        n_fft:      FFT size for STFT, read by the spectrogram domain only
+        rir_gain:   Factor the RIR is multiplied by so the diffusion schedule sees a standard
+                    deviation near 1; model_output_to_rir divides it back out
+
+    Returns:
+        [B, 1, 1, T] or [1, 1, T] on waveform, [B, 2, freq, time] or [2, freq, time] on spectrogram.
+    """
+    if isinstance(rir, np.ndarray):
+        rir = torch.from_numpy(rir)
+    rir = rir.float() * rir_gain
+
+    # Waveform — one real channel carried as a 1 x T image
+    if rir_domain == 'waveform':
+        if rir.dim() == 1:
+            return rir[None, None, :]
+        if rir.dim() == 2:
+            return rir[:, None, None, :]
+        raise ValueError(f"Expected 1D or 2D input, got {rir.dim()}D")
+
+    # Spectrogram — real and imaginary parts as two channels
+    if rir_domain == 'spectrogram':
+        return waveform_to_spectrogram(rir, hop_length, n_fft)
+
+    raise ValueError(f"Unknown rir_domain '{rir_domain}'; expected 'waveform' or 'spectrogram'")
+
+def model_output_to_rir(output, rir_domain, hop_length, n_fft, rir_gain):
+    """
+    Convert the UNet's output back to waveform(s) at the amplitude the dataset carried.
+
+    The inverse of rir_to_model_input: the waveform domain drops the two singleton axes, the
+    spectrogram domain runs the inverse STFT, and both divide rir_gain back out.
+
+    Args:
+        output:     Model output - shape [B, C, H, W] for batch or [C, H, W] for single
+        rir_domain: 'waveform' or 'spectrogram'
+        hop_length: Hop length used in the STFT, read by the spectrogram domain only
+        n_fft:      FFT size used in the STFT, read by the spectrogram domain only
+        rir_gain:   Factor rir_to_model_input multiplied the RIR by
+
+    Returns:
+        Reconstructed waveform(s) - shape [B, T] for batch or [T] for single.
+    """
+    # Waveform — the signal is the last axis, the other two are singletons
+    if rir_domain == 'waveform':
+        if isinstance(output, np.ndarray):
+            output = torch.from_numpy(output)
+        output = output.float()
+        if output.dim() == 3:
+            return output.reshape(-1) / rir_gain
+        if output.dim() == 4:
+            return output.reshape(output.shape[0], -1) / rir_gain
+        raise ValueError(f"Expected 3D or 4D input, got {output.dim()}D")
+
+    # Spectrogram — real and imaginary channels back through the inverse STFT
+    if rir_domain == 'spectrogram':
+        return spectrogram_to_waveform(output, hop_length, n_fft) / rir_gain
+
+    raise ValueError(f"Unknown rir_domain '{rir_domain}'; expected 'waveform' or 'spectrogram'")
+
 def plot_waveform(signals, legend=None, title=None, sr=None, save_path=None):
     """
     Plot multiple waveform signals on a single graph.

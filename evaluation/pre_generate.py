@@ -36,7 +36,7 @@ from utils.dataset_utils import build_condition_tensor
 from utils.inference_data_loading import (build_test_dataloader, data_params_from_run_config,
                                           load_pretrained_model)
 from utils.misc import get_full_path
-from utils.signal_proc import spectrogram_to_waveform, unscale_rir
+from utils.signal_proc import model_output_to_rir, unscale_rir
 
 
 # =============================================================================
@@ -146,23 +146,25 @@ def generate_batch(model, batch, settings: dict, device, src_trgt_dist_cond: boo
     """
     Generate one batch of RIRs and return them as waveforms at the model's output length.
 
-    The spectrogram the model produces is converted to a waveform and then un-scaled, so the
-    result is on the same footing as a reference RIR.
+    Whatever rir_domain the run used, the generated RIR is converted to a waveform, divided by
+    rir_gain and un-scaled — mirroring what training did to the dataset — so it is on the same footing as a reference RIR.
 
     Returns:
         [B, T] float32 numpy array.
     """
     a = run_config['args']
+    rir_domain = run_config['model_config']['rir_domain']
+    rir_gain = run_config['model_config']['rir_gain']
     conditions = build_condition_tensor(batch, device, src_trgt_dist_cond)
     images = batch['images'].to(device) if 'images' in batch else None
-    shape = (conditions.shape[0], 2, *model.sample_size)   # real and imaginary channels
+    shape = (conditions.shape[0], model.config['in_channels'], *model.sample_size)
 
-    specs = model.generate(cond=conditions, shape=shape, images=images,
-                           num_inference_steps=settings['num_inference_steps'],
-                           guidance_scale=settings['guidance_scale'],
-                           use_ddim=settings['sampler'] == 'ddim', verbose=False)
+    generated = model.generate(cond=conditions, shape=shape, images=images,
+                               num_inference_steps=settings['num_inference_steps'],
+                               guidance_scale=settings['guidance_scale'],
+                               use_ddim=settings['sampler'] == 'ddim', verbose=False)
 
-    waveforms = spectrogram_to_waveform(specs, a['hop_length'], a['n_fft']).float()   # [B, T]
+    waveforms = model_output_to_rir(generated, rir_domain, a['hop_length'], a['n_fft'], rir_gain)
     if settings['unscaling'] == 'condition_rt60':
         waveforms = unscale_rir(waveforms, a['sr_target'], batch['rt60'].cpu())
 

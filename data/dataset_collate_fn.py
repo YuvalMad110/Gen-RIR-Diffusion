@@ -1,16 +1,13 @@
 import torch
 from typing import List, Tuple
-from utils.signal_proc import waveform_to_spectrogram, scale_rir, zero_tail
+from utils.signal_proc import scale_rir, zero_tail
 
 
-def scale_and_spectrogram_collate_fn(sr: float,
-                                     db_cutoff: float = -40.0,
-                                     n_fft: int = 256,
-                                     hop_length: int = 64,
-                                     scale_rir_flag: bool = True,
-                                     use_spectrogram: bool = True,
-                                     apply_zero_tail: bool = False,
-                                     use_rt60: bool = False):
+def scale_collate_fn(sr: float,
+                     db_cutoff: float = -40.0,
+                     scale_rir_flag: bool = True,
+                     apply_zero_tail: bool = False,
+                     use_rt60: bool = False):
     """
     Factory that returns a collate function for use with DataLoader.
 
@@ -18,7 +15,7 @@ def scale_and_spectrogram_collate_fn(sr: float,
     of shape [1, T]. The collate assumes this contract.
 
     The returned function produces a dict batch with keys:
-        'rir'         — [B, 2, F, T] spectrogram or [B, 1, T] waveform
+        'rir'         — [B, T] waveform
         'room_dim'    — [B, 3]
         'mic_loc'     — [B, 3]
         'speaker_loc' — [B, 3]
@@ -32,10 +29,7 @@ def scale_and_spectrogram_collate_fn(sr: float,
     Args:
         sr:              sample rate of the RIRs
         db_cutoff:       dB level the zero-tail cutoff point is read at
-        n_fft:           FFT size for spectrogram
-        hop_length:      hop length for spectrogram
         scale_rir_flag:  whether to flatten each RIR's decay, at the rate its rt60 implies
-        use_spectrogram: whether to convert to spectrogram
         apply_zero_tail: whether to zero the signal after the db_cutoff point
         use_rt60:        must match the dataset's own use_rt60, since it sets how many fields each sample carries
     """
@@ -50,10 +44,6 @@ def scale_and_spectrogram_collate_fn(sr: float,
 
         if scale_rir_flag:
             batch_rirs = scale_rir(batch_rirs, sr, rt60s)
-
-        if use_spectrogram:
-            batch_rirs = waveform_to_spectrogram(
-                waveform=batch_rirs, hop_length=hop_length, n_fft=n_fft)
 
         return batch_rirs
 

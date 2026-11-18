@@ -1,0 +1,78 @@
+{
+  "_section_signal": "RIR Representation",
+  "rir_domain": "waveform",
+  "rir_gain": 15.127,
+  "_rir_domain": [
+    "'waveform' diffuses on the raw RIR, presented to the UNet as a 1 x T image, which removes the phase reconstruction that smears the direct-sound peak. 'spectrogram', the default when the key is absent, diffuses on the two-channel STFT.",
+    "Downsampling a height-1 axis is a no-op, so the 2D UNet needs no change and cross-attention is untouched. The waveform is also the cheaper input: block 0 runs attention at full resolution, and 9,600 positions is fewer than the spectrogram's 2 x 129 x 151 = 19,479.",
+    "The key sets in_channels, out_channels and sample_size, so it changes weight shapes and must stay recorded in the checkpoint's run_config for inference to read back."
+  ],
+  "_rir_gain": [
+    "x_0 is multiplied by this before noising and divided by it after denoising, so it never reaches the loss terms or the saved waveforms. 1.0 leaves the amplitude as the collate produced it.",
+    "The scheduler forms x_t = sqrt(a_t)*x_0 + sqrt(1-a_t)*eps with eps standard normal, so the noise always has standard deviation 1 and what decides how much of the schedule carries signal is x_0's own standard deviation sigma: SNR(t) = a_t * sigma^2 / (1 - a_t).",
+    "The crossover is the first t where SNR falls below 1; past it the input is almost all noise, so the model scores well by echoing it and needs none of the conditioning. Our scaled RIRs have median sigma 0.0661, crossing at t = 16, which leaves 98.4% of uniformly sampled timesteps teaching almost nothing.",
+    "15.127 = 1 / 0.0661 puts the median RIR at sigma = 1 and moves the crossover to t = 259. Measured over all 49,807 training RIRs of split 2a27d99b498d by debug/sigma_gain_probe.py; the report is written to the run directory as sigma_gain_probe.txt.",
+    "One constant moves the median only: after the gain p1 sits at sigma 0.151 (crossover t = 43) and p99 at 24.7 (t = 795). Per-sample normalisation is not usable because undoing it at generation needs the target's own sigma, which inference does not have."
+  ],
+
+  "_section_unet": "UNet Architecture",
+  "block_out_channels": [32, 32, 64, 64, 128, 128, 256, 256, 256],
+  "layers_per_block": 2,
+  "use_cross_attention": null,
+  "attention_head_dim": 2,
+  "norm_num_groups": null,
+  "use_mid_block": true,
+  "in_channels": 1,
+  "out_channels": 1,
+  "_block_out_channels": [
+    "Nine blocks give eight halvings, since the last down block does not downsample. At 16 kHz over a 0.6 s window that puts the deepest level at 37 positions of 16 ms each, spanning 48 ms per convolution — the same temporal pyramid the three-block spectrogram model has, where one frame is already 16 ms at hop_length 64.",
+    "Depth is nearly free and the channel ladder is what costs, so the ladder repeats each width before doubling: 37.4M parameters and 2,238 ms per step at batch 8, against 4.1M and 7,833 ms for the spectrogram model. Peak memory is 2.97 GiB versus 4.89 GiB.",
+    "in_channels and out_channels are 1 because one real channel replaces the spectrogram's real and imaginary pair.",
+    "norm_num_groups resolves to 32, the GCD of the ladder. use_cross_attention null puts cross-attention on block 0 alone, at full resolution."
+  ],
+
+  "_section_scalar_cond": "Scalar Conditioning MLP",
+  "use_cond_encoder": true,
+  "encoder_hidden_dims": [64, 128],
+  "src_trgt_dist_cond": true,
+
+  "_section_pos_encoder": "Fourier Positional Encoder (applied before condition MLP)",
+  "pos_encoder_cfg": {
+    "enable": true,
+    "encode_mode": "full",
+    "n_freqs": 6,
+    "log_scale": true,
+    "include_raw": true,
+    "max_freq_log2": 4.0,
+    "input_norm": [15, 15, 5, 15, 15, 5, 15, 15, 5, 3.0, 15]
+  },
+
+  "_section_image_cond": "Image Conditioning",
+  "image_fusion": "cross_attn",
+  "fusion_enable": true,
+  "image_encoder_config": {
+    "model_variant": "large",
+    "feature_mode": "pyramid",
+    "last_n": 4,
+    "layer_combination": "fuse",
+    "spatial_pool_factor": null,
+    "image_size": [224, 294]
+  },
+
+  "_section_guidance": "Classifier-Free Guidance",
+  "guidance_enabled": true,
+  "guidance_dropout_prob": 0.1,
+
+  "_section_loss": "Loss Weighting (training only; standard MSE if: key omitted, set to null, or method='none')",
+  "loss_weighting": null,
+
+  "_section_c50_loss": "Clarity Loss Term (training only; off if the key is omitted or set to null)",
+  "c50_loss": null,
+
+  "_section_edc_loss": "Energy Decay Curve Loss Term (training only; off if the key is omitted or set to null)",
+  "edc_loss": null,
+  "_losses": "All three terms are off so the first waveform run differs from the golden spectrogram run in the signal representation alone. See model_config_VisualCond_MP3D.json for what each term does and how its weight is chosen.",
+
+  "_Note": "Every top-level key starting with '_' is for documentation purposes and is not used in the code.",
+  "_image_size": "Matterport3D is rendered at 224x294, giving a 16x21 = 336-patch grid per image. With 5 images per sample that is 1680 cross-attention tokens. If VRAM is tight, set spatial_pool_factor to 2 rather than shrinking image_size, so the backbone still runs at the rendered resolution."
+}

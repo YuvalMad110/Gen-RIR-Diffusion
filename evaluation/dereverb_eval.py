@@ -100,7 +100,7 @@ from utils.inference_data_loading import (
 )
 from utils.dataset_utils import build_condition_tensor
 from utils.misc import str2bool, get_full_path
-from utils.signal_proc import spectrogram_to_waveform, unscale_rir_from_reference
+from utils.signal_proc import model_output_to_rir, unscale_rir_from_reference
 
 # --- Dereverberation model interface -----------------------------------------
 from evaluation.lib.dereverberation_models import build_dereverb_model, DEREVERB_SR, DereverbModel
@@ -246,20 +246,18 @@ def generate_rir_batch(model, conditions: torch.Tensor, data_info: dict, device:
     list of 1-D numpy float32 arrays at data_info['sr_target']
     """
     batch_size = conditions.shape[0]
-    channels   = 2   # real + imaginary parts of the spectrogram
-    shape      = (batch_size, channels, *model.sample_size)
+    shape      = (batch_size, model.config['in_channels'], *model.sample_size)
 
-    gen_specs = model.generate(cond=conditions, shape=shape, num_inference_steps=num_inference_steps,
+    generated = model.generate(cond=conditions, shape=shape, num_inference_steps=num_inference_steps,
                                guidance_scale=guidance_scale, verbose=False, use_ddim=use_ddim,
                                images=images)
 
-    if torch.is_tensor(gen_specs):
-        gen_specs = gen_specs.cpu().numpy()
+    if torch.is_tensor(generated):
+        generated = generated.cpu().numpy()
 
-    # spectrogram_to_waveform returns a tensor; convert to numpy here so the
-    # rest of the pipeline (resample_rir, fftconvolve) works uniformly.
+    # model_output_to_rir returns a tensor; convert to numpy here so the rest of the pipeline (resample_rir, fftconvolve) works uniformly.
     return [
-        spectrogram_to_waveform(gen_specs[i], data_info["hop_length"], data_info["n_fft"])
+        model_output_to_rir(generated[i], data_info["rir_domain"], data_info["hop_length"], data_info["n_fft"], data_info["rir_gain"])
         .cpu().numpy().astype(np.float32)
         for i in range(batch_size)
     ]

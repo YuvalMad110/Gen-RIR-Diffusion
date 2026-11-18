@@ -36,7 +36,7 @@ from run_train import resolve_c50_loss
 from trainer import DiffusionTrainer
 from utils.dataset_utils import build_condition_tensor
 from utils.inference_data_loading import load_pretrained_model
-from utils.signal_proc import waveform_to_spectrogram
+from utils.signal_proc import rir_to_model_input
 
 # Fractions of the noise loss's gradient the clarity term could be asked to carry
 TARGET_SHARES = (0.02, 0.05, 0.10, 0.20, 0.50)
@@ -57,7 +57,7 @@ def build_train_dataloader(run_config: dict, batch_size: int, workers: int):
     Returns:
         A DataLoader over the training split, yielding the dict the trainer's forward step reads.
     """
-    from data.dataset_collate_fn import scale_and_spectrogram_collate_fn
+    from data.dataset_collate_fn import scale_collate_fn
     from data.soundspaces import create_soundspaces_datasets
 
     a = run_config['args']
@@ -80,9 +80,8 @@ def build_train_dataloader(run_config: dict, batch_size: int, workers: int):
         use_rt60=a['use_rt60_condition'],
     )
 
-    collate_fn = scale_and_spectrogram_collate_fn(
-        sr=a['sr_target'], db_cutoff=a['db_cutoff'], n_fft=a['n_fft'], hop_length=a['hop_length'],
-        scale_rir_flag=a['scale_rir'], use_spectrogram=False,
+    collate_fn = scale_collate_fn(
+        sr=a['sr_target'], db_cutoff=a['db_cutoff'], scale_rir_flag=a['scale_rir'],
         apply_zero_tail=a['apply_zero_tail'], use_rt60=a['use_rt60_condition'])
 
     loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=workers,
@@ -109,7 +108,9 @@ def build_term_source(run_config: dict, scheduler, c50_loss: dict):
     source = types.SimpleNamespace(
         noise_scheduler=scheduler, n_fft=a['n_fft'], hop_length=a['hop_length'],
         sr=a['sr_target'], scale_rir=a['scale_rir'], c50_loss=c50_loss,
-        loss_weighting=run_config['model_config'].get('loss_weighting'))
+        loss_weighting=run_config['model_config'].get('loss_weighting'),
+        rir_domain=run_config['model_config']['rir_domain'],
+        rir_gain=run_config['model_config']['rir_gain'])
     source._noise_loss         = types.MethodType(DiffusionTrainer._noise_loss, source)
     source._denoised_waveforms = types.MethodType(DiffusionTrainer._denoised_waveforms, source)
     source._timestep_weight    = types.MethodType(DiffusionTrainer._timestep_weight, source)
@@ -145,8 +146,8 @@ def measure_batch(batch, model, source, scheduler, device, src_trgt_dist_cond: b
         The two gradient norms and the two loss values, or None when no sample in the batch
         carried a defined clarity on both sides.
     """
-    rir       = waveform_to_spectrogram(batch['rir'].to(device),
-                                        hop_length=source.hop_length, n_fft=source.n_fft)
+    rir       = rir_to_model_input(batch['rir'].to(device), source.rir_domain,
+                                   source.hop_length, source.n_fft, source.rir_gain)
     condition = build_condition_tensor(batch, device, src_trgt_dist_cond)
     images    = batch['images'].to(device) if 'images' in batch else None
 

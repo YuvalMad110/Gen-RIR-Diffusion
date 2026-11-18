@@ -36,7 +36,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from utils.signal_proc import spectrogram_to_waveform, unscale_rir_from_reference
+from utils.signal_proc import model_output_to_rir, unscale_rir_from_reference
 from utils.inference_data_loading import (
     load_pretrained_model, data_params_from_run_config,
     build_test_dataloader,
@@ -125,7 +125,7 @@ def run_inference_for_pair(
     if has_image_encoder and 'images' in batch:
         images = batch['images'].to(device)
 
-    shape = (1, 2, *model.sample_size)
+    shape = (1, model.config['in_channels'], *model.sample_size)
     with torch.no_grad():
         gen_spec = model.generate(
             cond=conditions, shape=shape,
@@ -139,7 +139,7 @@ def run_inference_for_pair(
     if torch.is_tensor(gen_spec):
         gen_spec = gen_spec.cpu().numpy()
 
-    gen_wave = spectrogram_to_waveform(gen_spec[0], hop_length, n_fft)
+    gen_wave = model_output_to_rir(gen_spec[0], data_info['rir_domain'], hop_length, n_fft, data_info['rir_gain']) # [T]
 
     if scale_rir:
         rirs = batch['rir']

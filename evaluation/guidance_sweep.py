@@ -30,7 +30,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from utils.signal_proc import spectrogram_to_waveform, unscale_rir_from_reference
+from utils.signal_proc import model_output_to_rir, unscale_rir_from_reference
 from utils.inference_data_loading import (
     load_pretrained_model, data_params_from_run_config,
     build_test_dataloader, _normalize_batch_to_dict,
@@ -94,17 +94,18 @@ def generate_for_scale(model, conditions, guidance_scale, sample_size, data_info
         gen_waveforms: list of 1D numpy arrays
     """
     batch_size = conditions.shape[0]
-    shape = (batch_size, 2, *sample_size)  # 2 channels: Real + Imag
+    shape = (batch_size, model.config['in_channels'], *sample_size)
 
-    generated_specs = model.generate(
+    generated = model.generate(
         cond=conditions, shape=shape, num_inference_steps=num_inference_steps,
         guidance_scale=guidance_scale, verbose=False, use_ddim=use_ddim, images=images)
 
-    if torch.is_tensor(generated_specs):
-        generated_specs = generated_specs.cpu().numpy()
+    if torch.is_tensor(generated):
+        generated = generated.cpu().numpy()
 
     hop_length, n_fft = data_info['hop_length'], data_info['n_fft']
-    gen_waveforms = [spectrogram_to_waveform(generated_specs[i], hop_length, n_fft) for i in range(batch_size)]
+    gen_waveforms = [model_output_to_rir(generated[i], data_info['rir_domain'], hop_length, n_fft,
+                                         data_info['rir_gain']) for i in range(batch_size)]   # each [T]
 
     if reference is not None:
         gen_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in gen_waveforms])

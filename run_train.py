@@ -12,7 +12,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 from data.soundspaces import DATASET_DEFAULTS, create_soundspaces_datasets
-from data.dataset_collate_fn import scale_and_spectrogram_collate_fn
+from data.dataset_collate_fn import scale_collate_fn
 from RIRDiffusionModel import RIRDiffusionModel
 from image_encoder import ImageEncoder
 from diffusers import DDPMScheduler
@@ -135,15 +135,19 @@ def parse_args():
 # Model configuration
 # =============================================================================
 
+# The signal the model diffuses on; sets the UNet's channel count and sample_size
+RIR_DOMAINS = ('spectrogram', 'waveform')
+
+
 def load_model_config(config_path, use_rt60_condition=False):
     """Load and prepare model config.
 
-    Pops image_encoder_config into ie_config, converts image_size to tuple,
-    and extracts src_trgt_dist_cond (consumed here to compute input_cond_dim;
-    not a RIRDiffusionModel parameter).
+    Pops image_encoder_config into ie_config, converts image_size to tuple, and pops the keys the
+    RIRDiffusionModel constructor does not accept: src_trgt_dist_cond (consumed here to compute
+    input_cond_dim), the signal representation, and the loss term settings.
 
     Returns:
-        (model_config, ie_config, src_trgt_dist_cond, loss_weighting, c50_loss, edc_loss)
+        (model_config, ie_config, src_trgt_dist_cond, rir_domain, rir_gain, loss_weighting, c50_loss, edc_loss)
     """
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Model configuration file not found: {config_path}")
@@ -151,6 +155,14 @@ def load_model_config(config_path, use_rt60_condition=False):
         model_config = json.load(f)
     # Strip comment keys (any key starting with "_" is treated as a comment)
     model_config = {k: v for k, v in model_config.items() if not k.startswith('_')}
+    rir_domain = model_config.pop('rir_domain')
+    if rir_domain not in RIR_DOMAINS:
+        raise ValueError(f"Unknown rir_domain '{rir_domain}'; expected one of {sorted(RIR_DOMAINS)}")
+    # x_0 is multiplied by this before noising and divided by it after denoising, so the schedule
+    # sees a standard deviation near 1; 1.0 leaves the amplitude as the collate produced it
+    rir_gain = model_config.pop('rir_gain', 1.0)
+    if not rir_gain > 0:
+        raise ValueError(f"rir_gain must be positive, got {rir_gain}")
     # input_cond_dim: base 9-dim + 1 for RT60 if enabled; +1 if src_trgt_dist_cond
     src_trgt_dist_cond = model_config.pop('src_trgt_dist_cond')
     base_dim = 10 if use_rt60_condition else 9
@@ -163,7 +175,7 @@ def load_model_config(config_path, use_rt60_condition=False):
         raise ValueError("loss_weighting 'rt60_binary' requires use_rt60_condition=True (batch['rt60'] must be present)")
     c50_loss = resolve_c50_loss(model_config.pop('c50_loss', None))
     edc_loss = resolve_edc_loss(model_config.pop('edc_loss', None))
-    return model_config, ie_config, src_trgt_dist_cond, loss_weighting, c50_loss, edc_loss
+    return model_config, ie_config, src_trgt_dist_cond, rir_domain, rir_gain, loss_weighting, c50_loss, edc_loss
 
 
 # ---------- Clarity term ----------
@@ -273,16 +285,19 @@ def make_train_dataloader(dataset, args, collate_fn):
                       drop_last=True, pin_memory=torch.cuda.is_available())
 
 
-def get_sample_size(dataloader, n_fft, hop_length):
-    """Get the sample size that the UNet will operate on (spectrogram dimensions).
-    If the dataloader returns spectrograms [B, C, F, T], use those directly.
-    If it returns raw waveforms [B, C, T], compute the spectrogram dimensions from n_fft/hop_length.
+def get_sample_size(dataloader, rir_domain, n_fft, hop_length):
+    """The spatial shape the UNet operates on, taken from one batch of the training data.
+
+    A waveform run presents the RIR as a 1 x T image. A spectrogram run uses the STFT's frequency
+    and frame counts, computed from n_fft and hop_length, or the batch's own trailing dimensions
+    when the collate already returns spectrograms.
     """
     for batch in dataloader:
         rir = batch['rir']
         if rir.ndim >= 3:
             return rir.shape[2:]
-        # Raw waveforms [B, T] — compute spectrogram size
+        if rir_domain == 'waveform':
+            return torch.Size([1, rir.shape[-1]])
         n_freq = n_fft // 2 + 1
         n_frames = rir.shape[-1] // hop_length + 1
         return torch.Size([n_freq, n_frames])
@@ -296,7 +311,7 @@ def get_sample_size(dataloader, n_fft, hop_length):
 POST_TRAIN_EVAL_SAMPLER = {'num_inference_steps': 200, 'guidance_scale': 2.0, 'seed': 42}
 
 # Generation carries no gradients, so it takes this multiple of the training batch size
-POST_TRAIN_EVAL_BATCH_FACTOR = 2
+POST_TRAIN_EVAL_BATCH_FACTOR = 1.5
 
 
 def _release_training_memory(accelerator, trainer) -> float:
@@ -322,7 +337,7 @@ def _run_post_train_eval(model_dir: str, train_batch_size: int, accelerator, tra
          '--num-inference-steps', str(sampler['num_inference_steps']),
          '--guidance-scale', str(sampler['guidance_scale']),
          '--seed', str(sampler['seed']),
-         '--batch-size', str(train_batch_size * POST_TRAIN_EVAL_BATCH_FACTOR)],
+         '--batch-size', str(int(train_batch_size * POST_TRAIN_EVAL_BATCH_FACTOR))],
         ['python3', os.path.join(evaluation_dir, 'run_evaluation.py'), '--run-dir', model_dir],
     ]
 
@@ -361,7 +376,8 @@ def main():
 
     # ---------- Model config ----------
     args.model_config = str(get_full_path(args.model_config, "config"))
-    model_config, ie_config, src_trgt_dist_cond, loss_weighting, c50_loss, edc_loss = load_model_config(args.model_config, args.use_rt60_condition)
+    (model_config, ie_config, src_trgt_dist_cond, rir_domain, rir_gain,
+     loss_weighting, c50_loss, edc_loss) = load_model_config(args.model_config, args.use_rt60_condition)
 
     # ---------- Load datasets ----------
     print("\n----------- Loading datasets... -----------\n")
@@ -386,16 +402,16 @@ def main():
     print(f"Dataset splits: {len(train_dataset)} - {len(eval_dataset)} - {len(test_dataset)}")
 
     # ---------- Create dataloaders ----------
-    collate_fn = scale_and_spectrogram_collate_fn(
-        sr=args.sr_target, db_cutoff=args.db_cutoff, n_fft=args.n_fft, hop_length=args.hop_length,
-        scale_rir_flag=args.scale_rir, use_spectrogram=False, apply_zero_tail=args.apply_zero_tail, use_rt60=args.use_rt60_condition)
+    collate_fn = scale_collate_fn(
+        sr=args.sr_target, db_cutoff=args.db_cutoff, scale_rir_flag=args.scale_rir,
+        apply_zero_tail=args.apply_zero_tail, use_rt60=args.use_rt60_condition)
     
     train_dataloader = make_train_dataloader(train_dataset, args, collate_fn)
 
     eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
         collate_fn=collate_fn, drop_last=False, pin_memory=torch.cuda.is_available())
 
-    sample_size = get_sample_size(train_dataloader, args.n_fft, args.hop_length)
+    sample_size = get_sample_size(train_dataloader, rir_domain, args.n_fft, args.hop_length)
     run_header = build_run_header(args, ie_config, git_hash, model_config, sample_size)
     print(f"\nxxxxxxx\nDataloader splits: {len(train_dataloader)} - {len(eval_dataloader)}\nxxxxxxx\n")
 
@@ -417,6 +433,8 @@ def main():
         **model_config,
     )
     model.config['src_trgt_dist_cond'] = src_trgt_dist_cond
+    model.config['rir_domain'] = rir_domain
+    model.config['rir_gain'] = rir_gain
     model.config['loss_weighting'] = loss_weighting
     model.config['c50_loss'] = c50_loss
     model.config['edc_loss'] = edc_loss
@@ -442,6 +460,8 @@ def main():
         eval_freq=args.eval_freq,
         n_fft=args.n_fft,
         hop_length=args.hop_length,
+        rir_domain=rir_domain,
+        rir_gain=rir_gain,
         run_header=run_header,
         src_trgt_dist_cond=src_trgt_dist_cond,
         sr=args.sr_target,

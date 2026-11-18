@@ -238,30 +238,6 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
     
-def spectrogram_to_waveform(spectrogram, n_fft=256, hop_length=128, length=None, device="cpu"):
-    """
-    Reconstruct waveform from spectrogram with shape [2, F, T] (real and imag parts).
-    
-    Args:
-        spectrogram (Tensor): Tensor of shape [2, F, T]
-        n_fft (int): FFT size used during STFT
-        hop_length (int): Hop length used during STFT
-        length (int, optional): Expected output length of the waveform
-        device (str or torch.device): Device to use
-    
-    Returns:
-        waveform (Tensor): Reconstructed waveform (1D tensor)
-    """
-    # Reconstruct complex STFT
-    real, imag = spectrogram[0], spectrogram[1]
-    complex_spec = torch.complex(real, imag)
-    # Create Hann window
-    window = torch.hann_window(n_fft, device=device)
-    # Apply inverse STFT
-    waveform = torch.istft(complex_spec, n_fft=n_fft, hop_length=hop_length,
-                           window=window, length=length)
-    return waveform
-
 def plot_signals(signals, legend=None, title="Signal Plot", save_path=None):
     """
     Plot multiple signals on a single plot.

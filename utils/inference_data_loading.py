@@ -19,7 +19,6 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from utils.signal_proc import waveform_to_spectrogram, spectrogram_to_waveform
 
 
 # =============================================================================
@@ -87,7 +86,6 @@ def data_params_from_run_config(run_config: Dict) -> Dict:
     return {
         'n_fft':               a['n_fft'],
         'hop_length':          a['hop_length'],
-        'use_spectrogram':     True,
         'sr_target':           a['sr_target'],
         'sample_max_sec':      a['sample_max_sec'],
         'nSamples':            a.get('nSamples'),
@@ -102,6 +100,8 @@ def data_params_from_run_config(run_config: Dict) -> Dict:
         'scene_dataset':       a['scene_dataset'],
         'use_rt60_condition':  a['use_rt60_condition'],
         't60_fit_range':       run_config['dataset_defaults']['t60_fit_range'],
+        'rir_domain':          run_config['model_config']['rir_domain'],
+        'rir_gain':            run_config['model_config']['rir_gain'],
     }
 
 
@@ -197,14 +197,11 @@ def build_test_dataloader(data_params: Dict, batch_size: int, workers: int,
         use_rt60=a['use_rt60_condition'],
     )
 
-    from data.dataset_collate_fn import scale_and_spectrogram_collate_fn
-    collate_fn = scale_and_spectrogram_collate_fn(
+    from data.dataset_collate_fn import scale_collate_fn
+    collate_fn = scale_collate_fn(
         sr=data_params['sr_target'],
         db_cutoff=data_params['db_cutoff'],
-        n_fft=data_params['n_fft'],
-        hop_length=data_params['hop_length'],
         scale_rir_flag=False,
-        use_spectrogram=False,
         apply_zero_tail=False,
         use_rt60=a['use_rt60_condition'],
     )
