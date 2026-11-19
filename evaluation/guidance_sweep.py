@@ -30,28 +30,35 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from utils.signal_proc import model_output_to_rir, unscale_rir_from_reference
+from utils.signal_proc import model_output_to_rir, unscale_rir
 from utils.inference_data_loading import (
     load_pretrained_model, data_params_from_run_config,
     build_test_dataloader, _normalize_batch_to_dict,
 )
 from utils.dataset_utils import build_condition_tensor
-from utils.acoustic_metrics import evaluate_rir_pair, aggregate_metrics, align_rir_lengths, compute_edc
+from utils.acoustic_metrics import (align_rir_lengths, compute_edc, DEFAULT_OCTAVE_BANDS,
+                                    DEFAULT_T60_FIT_RANGE)
 from utils.misc import get_israel_time, get_full_path
+from evaluation.build_test_references import load_test_references, resolve_split_id
+from evaluation.lib.generation_utils import generation_dir, generation_tag, load_generations
+from evaluation.lib.metrics_utils import aggregate
+from evaluation.lib.result_writers import load_dry_signal, score_rows
+from evaluation.pre_generate import resolve_unscaling
+from evaluation.run_evaluation import IDENTITY_COLUMNS
 import matplotlib.pyplot as plt
 
 
-# Mapping from metric key to (display_name, extractor, lower_is_better, eval_key)
-# eval_key is the key expected by evaluate_rir_pair
+# Mapping from metric key to (display_name, extractor, lower_is_better)
+# The extractor reads score_pair's flat row, the same row run_evaluation scores into metrics.csv
 RANKING_METRICS = {
-    't60_perc': ('T60% Error', lambda m: m['t60']['perc'], True, 't60'),
-    'edt': ('|EDT| Error (s)', lambda m: abs(m['edt']['error']), True, 'edt'),
-    'drr': ('|DRR| Error (dB)', lambda m: abs(m['drr']['error']), True, 'drr'),
-    'lsd': ('LSD (dB)', lambda m: m['lsd']['broadband'], True, 'lsd'),
-    'c50': ('|C50| Error (dB)', lambda m: abs(m['c50']['error']), True, 'c50'),
-    'c80': ('|C80| Error (dB)', lambda m: abs(m['c80']['error']), True, 'c80'),
-    'edc_distance': ('EDC Dist (dB²)', lambda m: m['edc_distance']['broadband'], True, 'edc_distance'),
-    'cosine_similarity': ('Cosine Sim', lambda m: m['cosine_similarity'], False, 'cosine_similarity'),
+    't60_perc': ('T60% Error', lambda m: m['t60_perc'], True),
+    'edt': ('|EDT| Error (s)', lambda m: m['edt_abs'], True),
+    'drr': ('|DRR| Error (dB)', lambda m: m['drr_abs'], True),
+    'lsd': ('LSD (dB)', lambda m: m['lsd_min'], True),
+    'c50': ('|C50| Error (dB)', lambda m: m['c50_abs'], True),
+    'c80': ('|C80| Error (dB)', lambda m: m['c80_abs'], True),
+    'edc_distance': ('EDC Dist (dB²)', lambda m: m['edc_distance'], True),
+    'cosine_similarity': ('Cosine Sim', lambda m: m['cosine_similarity'], False),
 }
 
 
@@ -59,39 +66,29 @@ RANKING_METRICS = {
 # Batch processing
 # =============================================================================
 
-def prepare_batch(batch, data_info, device, src_trgt_dist_cond: bool = False):
-    """Extract real waveforms, conditions, and the un-scaling reference from a dataloader batch.
+def prepare_batch(batch, device, src_trgt_dist_cond: bool = False):
+    """The conditioning tensor and the sample ids of one dataloader batch.
 
-    Handles both GTU tuple batches and SoundSpaces dict batches.
+    Handles both GTU tuple batches and SoundSpaces dict batches. The reference RIRs come from the
+    test reference store rather than from here, so the batch's own waveforms are never read.
 
     Returns:
-        real_waveforms: list of 1D numpy arrays
-        conditions: torch tensor [B, cond_dim] on device
-        reference: batched real RIRs [B, T] the generated RIRs are un-scaled against,
-                   or None when scaling is off
+        (conditions [B, cond_dim] on device, sample ids as a list of str)
     """
     batch = _normalize_batch_to_dict(batch)
-    rirs = batch['rir']
-    batch_size = rirs.shape[0]
-
-    real_waveforms = [rirs[i].cpu().numpy().squeeze() if torch.is_tensor(rirs[i]) else rirs[i].squeeze()
-                      for i in range(batch_size)]
-
     conditions = build_condition_tensor(batch, device, src_trgt_dist_cond)
-
-    reference = None
-    if data_info.get('scale_rir', False):
-        reference = torch.stack([torch.tensor(w, dtype=torch.float32) for w in real_waveforms])
-
-    return real_waveforms, conditions, reference
+    return conditions, [str(s) for s in batch['sample_id']]
 
 
 def generate_for_scale(model, conditions, guidance_scale, sample_size, data_info,
-                       num_inference_steps, use_ddim, reference=None, images=None):
-    """Generate RIRs for one guidance scale and return waveforms.
+                       num_inference_steps, use_ddim, rt60=None, images=None):
+    """Generate RIRs for one guidance scale, un-scaled the way the run was trained.
+
+    The decay is restored from the rt60 the model was conditioned on, matching what
+    pre_generate writes, so these waveforms are on the same footing as a stored generation set.
 
     Returns:
-        gen_waveforms: list of 1D numpy arrays
+        A list of 1-D numpy arrays, one per sample, in batch order.
     """
     batch_size = conditions.shape[0]
     shape = (batch_size, model.config['in_channels'], *sample_size)
@@ -100,20 +97,60 @@ def generate_for_scale(model, conditions, guidance_scale, sample_size, data_info
         cond=conditions, shape=shape, num_inference_steps=num_inference_steps,
         guidance_scale=guidance_scale, verbose=False, use_ddim=use_ddim, images=images)
 
-    if torch.is_tensor(generated):
-        generated = generated.cpu().numpy()
+    waveforms = model_output_to_rir(generated, data_info['rir_domain'], data_info['hop_length'],
+                                    data_info['n_fft'], data_info['rir_gain'])        # [B, T]
+    if rt60 is not None:
+        waveforms = unscale_rir(waveforms.cpu(), data_info['sr_target'], rt60)
+    return [w for w in waveforms.cpu().numpy().astype(np.float32)]
 
-    hop_length, n_fft = data_info['hop_length'], data_info['n_fft']
-    gen_waveforms = [model_output_to_rir(generated[i], data_info['rir_domain'], hop_length, n_fft,
-                                         data_info['rir_gain']) for i in range(batch_size)]   # each [T]
 
-    if reference is not None:
-        gen_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in gen_waveforms])
-        gen_unscaled = unscale_rir_from_reference(gen_tensor, reference, data_info['sr_target'],
-                                                  data_info.get('db_cutoff', -40))
-        gen_waveforms = [g.cpu().numpy() for g in gen_unscaled]
+def build_tasks_by_id(waveforms: dict, store: dict, store_index: dict, sample_ids: list):
+    """Pair each generated RIR with its own reference, matched by sample id.
 
-    return gen_waveforms
+    Matching by id rather than by row is what lets a sweep score a subset of the split: the
+    store holds every test pair, while a sweep may cover only some of them.
+
+    Returns:
+        (tasks, identities) in sample_ids order, shaped for score_rows.
+    """
+    rows = [store_index[sample_id] for sample_id in sample_ids]
+    identities = [{column: store[column][row] for column in IDENTITY_COLUMNS} for row in rows]
+    tasks = [(waveforms[sample_id], store['references'][row],
+              {key: store[key][row] for key in ('rt60', 'c50', 'drr')})
+             for sample_id, row in zip(sample_ids, rows)]
+    return tasks, identities
+
+
+def find_reusable_generations(model_dir, scales, args, unscaling: str) -> dict:
+    """The scales already on disk as a generation set this sweep can score instead of regenerating.
+
+    A set qualifies when its sampler, step count, seed and un-scaling match what the sweep would
+    run. Its waveforms were produced at pre_generate's own batch size, so a reused scale carries a
+    different noise draw from a generated one; the summary names which scales were reused.
+
+    Returns:
+        {scale: {sample_id: waveform}} for every scale that qualifies.
+    """
+    sampler = 'ddim' if args.use_ddim else 'ddpm'
+    reusable = {}
+
+    for scale in scales:
+        tag = generation_tag(sampler, args.num_inference_steps, scale, args.seed)
+        target = generation_dir(model_dir, tag)
+        if not target.exists():
+            continue
+        try:
+            stored = load_generations(target)
+        except Exception as error:
+            print(f"  scale {scale}: {target.name} unreadable, regenerating ({error})")
+            continue
+        if stored['config'].get('unscaling') != unscaling:
+            print(f"  scale {scale}: {target.name} un-scaled as "
+                  f"{stored['config'].get('unscaling')!r}, regenerating")
+            continue
+        reusable[scale] = dict(zip((str(s) for s in stored['sample_id']), stored['generated']))
+
+    return reusable
 
 
 # =============================================================================
@@ -134,7 +171,7 @@ def select_best_per_scale(results, top_scales, metric_key='t60'):
         indices: list of sample indices (one per top scale)
         overlap_info: list of (scale, original_best_idx, used_idx) for cases where overlap was resolved
     """
-    _, extractor, lower_is_better, _ = RANKING_METRICS[metric_key]
+    _, extractor, lower_is_better = RANKING_METRICS[metric_key]
     used = set()
     indices = []
     overlap_info = []
@@ -161,7 +198,7 @@ def select_global_medians(results, top_scales, metric_key='t60', n=3, exclude_in
     For each sample, compute sum of |rank - median_rank| across top scales.
     Pick the n samples with the smallest sum (excluding already-used indices).
     """
-    _, extractor, lower_is_better, _ = RANKING_METRICS[metric_key]
+    _, extractor, lower_is_better = RANKING_METRICS[metric_key]
     exclude = set(exclude_indices or [])
     n_samples = len(results[top_scales[0]])
     median_rank = (n_samples + 1) / 2.0
@@ -191,7 +228,7 @@ def select_global_medians(results, top_scales, metric_key='t60', n=3, exclude_in
 # =============================================================================
 
 def regenerate_selected(model, test_dataset, sample_indices, top_scales, data_info, device,
-                        sample_size, num_inference_steps, use_ddim, collate_fn,
+                        sample_size, num_inference_steps, use_ddim, collate_fn, unscaling,
                         src_trgt_dist_cond: bool = False):
     """Regenerate waveforms for selected samples at top scales.
 
@@ -200,19 +237,21 @@ def regenerate_selected(model, test_dataset, sample_indices, top_scales, data_in
         gen_waveforms: dict {(idx, scale): 1D numpy array}
     """
     batch = collate_fn([test_dataset[i] for i in sample_indices])
-    real_waveforms, conditions, reference = prepare_batch(batch, data_info, device, src_trgt_dist_cond)
+    conditions, _ = prepare_batch(batch, device, src_trgt_dist_cond)
 
     batch_dict = _normalize_batch_to_dict(batch)
     images = batch_dict['images'].to(device) if 'images' in batch_dict else None
+    rt60 = batch_dict['rt60'].cpu() if unscaling == 'condition_rt60' else None
 
-    ref_waveforms = {idx: real_waveforms[j] for j, idx in enumerate(sample_indices)}
+    rirs = batch_dict['rir']
+    ref_waveforms = {idx: rirs[j].cpu().numpy().squeeze() for j, idx in enumerate(sample_indices)}
     gen_waveforms = {}
 
     with torch.no_grad():
         for scale in top_scales:
             gen_wavs = generate_for_scale(
                 model, conditions, scale, sample_size, data_info,
-                num_inference_steps, use_ddim, reference, images=images)
+                num_inference_steps, use_ddim, rt60, images=images)
             for j, idx in enumerate(sample_indices):
                 gen_waveforms[(idx, scale)] = gen_wavs[j]
 
@@ -307,7 +346,7 @@ def compute_analysis(results, scales, metric_keys):
     avg_rank_table = {}
 
     for key in metric_keys:
-        _, extractor, lower_is_better, _ = RANKING_METRICS[key]
+        _, extractor, lower_is_better = RANKING_METRICS[key]
 
         # Build scores matrix [n_samples x n_scales]
         scores = np.full((n_samples, n_scales), np.nan)
@@ -476,7 +515,10 @@ def parse_args():
     parser.add_argument("--use_ddim", action="store_true")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=42, help='Seed for the sampling noise; also picks which stored generation sets can be reused')
+    parser.add_argument("--octave-bands", type=float, nargs='+', default=list(DEFAULT_OCTAVE_BANDS), help='Centre frequencies for the per-band T60')
+    parser.add_argument("--t60-fit-range", type=float, nargs=2, default=list(DEFAULT_T60_FIT_RANGE), help='dB window the T60 is fitted over')
     parser.add_argument("--debug_mode", type=bool, default=False)
     parser.add_argument("--speech_path", type=str, default='/dsi/gannot-lab/gannot-lab1/datasets/LibriSpeech/LibriSpeech/test-clean/4992/41797/4992-41797-0013.flac')
     # Sweep-specific
@@ -506,7 +548,14 @@ def main():
     for key in args.sweep_metrics:
         assert key in RANKING_METRICS, f"Unknown metric '{key}'. Options: {list(RANKING_METRICS.keys())}"
     assert args.vis_metric in RANKING_METRICS, f"Unknown vis_metric '{args.vis_metric}'"
-    eval_metrics = list({RANKING_METRICS[k][3] for k in args.sweep_metrics})
+
+    # Both tables compare scales against each other, so one scale leaves nothing to report
+    if len(scales) < 2:
+        raise SystemExit(
+            f"A sweep needs at least two guidance scales; --guidance-min {args.guidance_min} "
+            f"--guidance-max {args.guidance_max} --guidance-step {args.guidance_step} gives "
+            f"{len(scales)}. Widen the range, or score a single setting with "
+            f"pre_generate.py and run_evaluation.py.")
 
     # Load model
     print("Loading model...")
@@ -519,11 +568,8 @@ def main():
     assert getattr(model, 'guidance_enabled', False), \
         "Model was not trained with CFG — guidance sweep requires a CFG-trained model."
 
-    # Load dry signal for LSD (only if needed)
-    dry_signal = None
-    if 'lsd' in eval_metrics:
-        import librosa
-        dry_signal, _ = librosa.load(args.speech_path, sr=data_info['sr_target'])
+    # The LSD's dry speech, loaded the way run_evaluation loads it
+    dry_signal = load_dry_signal(args.speech_path, data_info['sr_target'])
 
     # Debug mode
     if args.debug_mode:
@@ -554,33 +600,53 @@ def main():
 
     sample_size = tuple(model.sample_size)
     sr = data_info['sr_target']
-    octave_bands = [125, 250, 500, 1000, 2000, 4000]
+    unscaling = resolve_unscaling(run_config)
+
+    # The store holds each reference at its native length together with the rt60, C50 and DRR the
+    # preparation scripts measured on it, so nothing about the reference is re-measured here
+    split_id, _ = resolve_split_id(run_config, test_dataset)
+    store = load_test_references(split_id)
+    store_index = {str(sample_id): i for i, sample_id in enumerate(store['sample_id'])}
 
     # ==========================================================================
-    # Sweep: single pass over dataloader, inner loop over scales
+    # Sweep: one pass over the dataloader, inner loop over scales
     # ==========================================================================
-    results = {scale: [] for scale in scales}
     model.eval()
+    reused = find_reusable_generations(model_dir, scales, args, unscaling)
+    to_generate = [scale for scale in scales if scale not in reused]
+    generated = {scale: dict(waveforms) for scale, waveforms in reused.items()}
+    for scale in to_generate:
+        generated[scale] = {}
 
-    print(f"Running sweep: {len(scales)} scales, {len(test_dataset)} samples, {len(test_dataloader)} batches...")
-    with torch.no_grad():
-        for batch in tqdm(test_dataloader, desc="Sweep"):
-            real_waveforms, conditions, reference = prepare_batch(batch, data_info, device, src_trgt_dist_cond)
-            batch_dict = _normalize_batch_to_dict(batch)
-            images = batch_dict['images'].to(device) if 'images' in batch_dict else None
+    if reused:
+        print(f"Reusing stored generations for scale(s) {sorted(reused)}")
 
-            for scale in scales:
-                gen_waveforms = generate_for_scale(
-                    model, conditions, scale, sample_size, data_info,
-                    args.num_inference_steps, args.use_ddim, reference, images=images)
+    if to_generate:
+        print(f"Generating {len(to_generate)} scale(s) over {len(test_dataset)} samples, "
+              f"{len(test_dataloader)} batches...")
+        with torch.no_grad():
+            for batch in tqdm(test_dataloader, desc="Sweep"):
+                conditions, sample_ids = prepare_batch(batch, device, src_trgt_dist_cond)
+                batch_dict = _normalize_batch_to_dict(batch)
+                images = batch_dict['images'].to(device) if 'images' in batch_dict else None
+                rt60 = batch_dict['rt60'].cpu() if unscaling == 'condition_rt60' else None
 
-                for i in range(len(real_waveforms)):
-                    rir_gen, rir_ref = align_rir_lengths(gen_waveforms[i], real_waveforms[i], mode='pad')
-                    metrics = evaluate_rir_pair(rir_gen, rir_ref, sr, octave_bands,
-                                               dry_signal=dry_signal, metrics=eval_metrics)
-                    results[scale].append(metrics)
+                for scale in to_generate:
+                    waveforms = generate_for_scale(
+                        model, conditions, scale, sample_size, data_info,
+                        args.num_inference_steps, args.use_ddim, rt60, images=images)
+                    generated[scale].update(zip(sample_ids, waveforms))
 
-    n_evaluated = len(results[scales[0]])
+    # ---------- Score every scale the way run_evaluation does ----------
+    print("Scoring...")
+    scored_ids = sorted(set.intersection(*(set(generated[scale]) for scale in scales)))
+    results = {}
+    for scale in scales:
+        tasks, identities = build_tasks_by_id(generated[scale], store, store_index, scored_ids)
+        results[scale] = score_rows(tasks, identities, sr, dry_signal, args.octave_bands,
+                                    tuple(args.t60_fit_range), workers=args.workers)
+
+    n_evaluated = len(scored_ids)
 
     # ==========================================================================
     # Analysis
@@ -605,7 +671,7 @@ def main():
     ref_waveforms, gen_waveforms = regenerate_selected(
         model, test_dataset, all_selected, top_scales, data_info, device,
         sample_size, args.num_inference_steps, args.use_ddim, test_dataloader.collate_fn,
-        src_trgt_dist_cond)
+        unscaling, src_trgt_dist_cond)
 
     plot_sweep_samples(all_selected, labels, top_scales, ref_waveforms, gen_waveforms,
                        sr, save_path / 'sweep_samples.png')
