@@ -13,7 +13,7 @@ All models: 3-block UNet [32, 64, 128], STFT spectrogram (2×129×345), sr=22050
 > Scene-level split: 3 train / 1 val / 2 test → 9,722 / 2,256 / 1,982 pairs.  
 > `scale_rir=True`, `apply_zero_tail=False`.
 
-**Current golden config:** `model_config_VisualCond_HighRes_PosEnc512_MaskLoss.json`
+**Golden:** `Aug11_23-51-50_dsief06`, config `model_config_VisualCond_Replica.json` — best T60 %, DRR and C50 of the Fourier-PE runs. LSD does not choose between them, since every value in this file comes from the LSD this log's header disowns.
 
 | Run | Key differentiator | T60 % | DRR (dB) | LSD (dB) | C50 MAE (dB) |
 |---|---|---|---|---|---|
