@@ -27,7 +27,7 @@ _DEFAULT_CFG     = 'model_config_VisualCond_MP3D.json'
 # Replica — the scene dataset has to be named, since matterport3d is the default:
 CUDA_VISIBLE_DEVICES=1 python3 ./Projects/Gen-RIR-Diffusion/run_train.py \
     --batch-size 58 --scene-dataset replica \
-    --model-config model_config_VisualCond_HighRes_PosEnc512.json \
+    --model-config model_config_VisualCond_Replica.json \
     |& tee -a "./Projects/Gen-RIR-Diffusion/outputs/logs/train_$(hostname -s)_$(date +%F_%H-%M-%S).log"
 
 # Smoke test before a long run — one epoch over a meaningful percentage of the dataset,
@@ -93,6 +93,7 @@ def parse_args():
     parser.add_argument('--max-void-outdoor', type=filter_threshold, default='auto', help='Drop pairs in open-to-sky rooms whose own view is emptier than this')
     parser.add_argument('--max-room-void', type=filter_threshold, default='auto', help='Drop enclosed rooms whose four overviews average emptier than this')
     parser.add_argument('--scale-rir', type=str2bool, default=True, help='Flatten each RIR\'s decay at the rate its stored rt60 implies (requires --use-rt60-condition)')
+    parser.add_argument('--scale-exponent', type=float, default=1.0, help='Share of the decay --scale-rir flattens; 1 cancels it, 0 leaves the RIR as it is')
     parser.add_argument('--apply-zero-tail', type=str2bool, default=False, help='Zero RIR values after the db-cutoff point')
     parser.add_argument('--db-cutoff', type=float, default=-40.0, help='dB level the zero-tail cutoff point is read at')
 
@@ -126,6 +127,8 @@ def parse_args():
 
     if args.scale_rir and not args.use_rt60_condition:
         parser.error('--scale-rir takes its decay rate from the stored rt60, so it requires --use-rt60-condition.')
+    if not args.scale_exponent > 0:
+        parser.error(f'--scale-exponent must be positive, got {args.scale_exponent}.')
     if args.eval_freq > args.epochs:
         parser.error(f'--eval-freq {args.eval_freq} over --epochs {args.epochs} never runs an evaluation pass.')
     return args
@@ -404,7 +407,7 @@ def main():
     # ---------- Create dataloaders ----------
     collate_fn = scale_collate_fn(
         sr=args.sr_target, db_cutoff=args.db_cutoff, scale_rir_flag=args.scale_rir,
-        apply_zero_tail=args.apply_zero_tail, use_rt60=args.use_rt60_condition)
+        scale_exponent=args.scale_exponent, apply_zero_tail=args.apply_zero_tail, use_rt60=args.use_rt60_condition)
     
     train_dataloader = make_train_dataloader(train_dataset, args, collate_fn)
 
@@ -469,6 +472,7 @@ def main():
         c50_loss=c50_loss,
         edc_loss=edc_loss,
         scale_rir=args.scale_rir,
+        scale_exponent=args.scale_exponent,
     )
 
     # ---------- Train ----------

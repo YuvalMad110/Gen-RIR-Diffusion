@@ -91,6 +91,7 @@ def data_params_from_run_config(run_config: Dict) -> Dict:
         'nSamples':            a.get('nSamples'),
         'db_cutoff':           a.get('db_cutoff', -40.0),
         'scale_rir':           a.get('scale_rir', False),
+        'scale_exponent':      a.get('scale_exponent', 1.0),
         'apply_zero_tail':     a.get('apply_zero_tail', False),
         'train_ratio':         a.get('train_ratio', 0.7),
         'eval_ratio':          a.get('eval_ratio', 0.15),

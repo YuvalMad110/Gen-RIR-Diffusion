@@ -43,6 +43,7 @@ class DiffusionTrainer():
                  c50_loss=None,
                  edc_loss=None,
                  scale_rir=False,
+                 scale_exponent=1.0,
                  patience=15):
         # -------- Cfg --------
         self.model = model
@@ -67,6 +68,7 @@ class DiffusionTrainer():
         self.c50_loss = c50_loss
         self.edc_loss = edc_loss
         self.scale_rir = scale_rir
+        self.scale_exponent = scale_exponent
         # Setup Accelerator for DDP/AMP
         self.accelerator = accelerator
         if self.accelerator.is_main_process:
@@ -252,8 +254,8 @@ class DiffusionTrainer():
 
         if self.scale_rir:
             rt60      = batch['rt60'].to(device)
-            predicted = unscale_rir(predicted, self.sr, rt60)
-            reference = unscale_rir(reference, self.sr, rt60)
+            predicted = unscale_rir(predicted, self.sr, rt60, self.scale_exponent)
+            reference = unscale_rir(reference, self.sr, rt60, self.scale_exponent)
 
         return predicted, reference, alphas
 

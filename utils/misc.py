@@ -45,7 +45,7 @@ def build_run_header(args, ie_config, git_hash, model_config, sample_size):
         f"{_P}[Run]         Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Host: {socket.gethostname()} | Git: {git_hash}",
         f"{_P}[Dataset]     Name: {args.scene_dataset} | Split: {args.train_ratio:.2f}/{args.eval_ratio:.2f}/{args.test_ratio:.2f} | Seed: {args.random_seed} | nSamples: {args.nSamples}",
         f"{_C}Scenes: {scenes_str}",
-        f"{_P}[Audio]       SR: {args.sr_target} Hz | MaxSec: {args.sample_max_sec}s | n_fft: {args.n_fft} | hop: {args.hop_length} | dB: {args.db_cutoff} | scale: {args.scale_rir} | zero_tail: {args.apply_zero_tail}",
+        f"{_P}[Audio]       SR: {args.sr_target} Hz | MaxSec: {args.sample_max_sec}s | n_fft: {args.n_fft} | hop: {args.hop_length} | dB: {args.db_cutoff} | scale: {args.scale_rir} (exp {args.scale_exponent}) | zero_tail: {args.apply_zero_tail}",
     ]
 
     if args.image_root is not None and ie_config is not None:

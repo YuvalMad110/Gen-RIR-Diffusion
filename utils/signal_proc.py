@@ -521,8 +521,10 @@ def decay_rate_from_t60(t60):
     """
     The decay rate used as:
 
-        scaled = rir * exp(k * t)          flattens the decay, via scale_rir
-        rir    = scaled * exp(-k * t)      puts it back, via unscale_rir
+        scaled = rir * exp(a * k * t)      flattens the decay, via scale_rir
+        rir    = scaled * exp(-a * k * t)  puts it back, via unscale_rir
+
+    where a is the scale exponent: 1 flattens the decay fully, 0 leaves the RIR untouched.
 
     T60 is the time to fall 60 dB, so the energy decays as 10^(-6t/T60) and the amplitude as
     its square root, giving an amplitude rate of 3*ln(10)/T60.
@@ -536,39 +538,43 @@ def decay_rate_from_t60(t60):
     return (3.0 * np.log(10.0)) / t60
 
 
-def scale_rir(rir: torch.Tensor, sr: float, rt60) -> torch.Tensor:
+def scale_rir(rir: torch.Tensor, sr: float, rt60, scale_exponent) -> torch.Tensor:
     """
     Flatten each RIR's exponential decay. The rate k comes straight from rt60.
 
     Args:
-        rir:   Time-domain RIR tensor [batch, time]
-        sr:    Sample rate
-        rt60:  Reverberation time per RIR, in seconds [batch]
+        rir:            Time-domain RIR tensor [batch, time]
+        sr:             Sample rate
+        rt60:           Reverberation time per RIR, in seconds [batch]
+        scale_exponent: Share of the decay to flatten; 1 cancels it, 0 leaves the RIR as it is
 
     Returns:
-        rir * exp(k*t), shape [batch, time]
+        rir * exp(scale_exponent*k*t), shape [batch, time]
     """
-    return rir * _exp_envelope(_k_tensor(rt60, rir.device), rir.shape[-1], sr)
+    k = scale_exponent * _k_tensor(rt60, rir.device)
+    return rir * _exp_envelope(k, rir.shape[-1], sr)
 
 
-def unscale_rir(scaled_rir: torch.Tensor, sr: float, rt60) -> torch.Tensor:
+def unscale_rir(scaled_rir: torch.Tensor, sr: float, rt60, scale_exponent) -> torch.Tensor:
     """
     Restore an RIR that scale_rir flattened. The rate k comes straight from rt60, so the
     same value that scaled it recovers it.
 
     Args:
-        scaled_rir: Scaled time-domain RIR tensor [batch, time]
-        sr:         Sample rate
-        rt60:       Reverberation time per RIR, in seconds [batch]
+        scaled_rir:     Scaled time-domain RIR tensor [batch, time]
+        sr:             Sample rate
+        rt60:           Reverberation time per RIR, in seconds [batch]
+        scale_exponent: The exponent scale_rir was given
 
     Returns:
-        scaled_rir * exp(-k*t), shape [batch, time]
+        scaled_rir * exp(-scale_exponent*k*t), shape [batch, time]
     """
-    return scaled_rir * _exp_envelope(-_k_tensor(rt60, scaled_rir.device), scaled_rir.shape[-1], sr)
+    k = scale_exponent * _k_tensor(rt60, scaled_rir.device)
+    return scaled_rir * _exp_envelope(-k, scaled_rir.shape[-1], sr)
 
 
 def unscale_rir_from_reference(scaled_rir: torch.Tensor, reference: torch.Tensor,
-                               sr: float, db_cutoff: float = -40.0) -> torch.Tensor:
+                               sr: float, scale_exponent, db_cutoff: float = -40.0) -> torch.Tensor:
     """
     Restore an RIR whose scaling rate was fitted to a reference RIR's decay curve rather
     than taken from rt60.
@@ -577,16 +583,17 @@ def unscale_rir_from_reference(scaled_rir: torch.Tensor, reference: torch.Tensor
     hand and any T60 measured from the result carries some of the reference's own decay.
 
     Args:
-        scaled_rir: Scaled time-domain RIR tensor [batch, time]
-        reference:  Ground-truth RIRs the rate is fitted to [batch, time]
-        sr:         Sample rate
-        db_cutoff:  dB level the fit runs down to
+        scaled_rir:     Scaled time-domain RIR tensor [batch, time]
+        reference:      Ground-truth RIRs the rate is fitted to [batch, time]
+        sr:             Sample rate
+        scale_exponent: The exponent scale_rir was given
+        db_cutoff:      dB level the fit runs down to
 
     Returns:
-        scaled_rir * exp(-k*t), shape [batch, time]
+        scaled_rir * exp(-scale_exponent*k*t), shape [batch, time]
     """
     k, _ = estimate_decay_k_factor(calculate_edc(reference), sr, db_cutoff)
-    return scaled_rir * _exp_envelope(-k, scaled_rir.shape[-1], sr)
+    return scaled_rir * _exp_envelope(-scale_exponent * k, scaled_rir.shape[-1], sr)
 
 
 def zero_tail(rir: torch.Tensor, sr: float, db_cutoff: float = -40.0) -> torch.Tensor:

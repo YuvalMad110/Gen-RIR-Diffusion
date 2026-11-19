@@ -129,7 +129,9 @@ def scaled_peak(rir, sr, t60, args):
     length = int(args.sr_target * args.sample_max_sec)
     rir    = torch.nn.functional.pad(rir, (0, max(0, length - rir.shape[-1])))[:, :length]
 
-    scaled = scale_rir(rir, args.sr_target, t60)
+    # Fixed at the full exponent: this peak defines the max_scaled_peak filter, and changing it
+    # would fork the split every trained model is comparable on
+    scaled = scale_rir(rir, args.sr_target, t60, 1.0)
     spec   = waveform_to_spectrogram(scaled, hop_length=args.hop_length, n_fft=args.n_fft)
     return float(spec.abs().max())
 

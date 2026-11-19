@@ -166,7 +166,7 @@ def generate_batch(model, batch, settings: dict, device, src_trgt_dist_cond: boo
 
     waveforms = model_output_to_rir(generated, rir_domain, a['hop_length'], a['n_fft'], rir_gain)
     if settings['unscaling'] == 'condition_rt60':
-        waveforms = unscale_rir(waveforms, a['sr_target'], batch['rt60'].cpu())
+        waveforms = unscale_rir(waveforms, a['sr_target'], batch['rt60'].cpu(), a.get('scale_exponent', 1.0))
 
     return waveforms.cpu().numpy().astype(np.float32)
 

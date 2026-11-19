@@ -147,8 +147,7 @@ def run_inference_for_pair(
 
         real_t = torch.tensor(ref_np, dtype=torch.float32).unsqueeze(0)
         gen_t  = torch.tensor(gen_wave, dtype=torch.float32).unsqueeze(0)
-        gen_wave = unscale_rir_from_reference(gen_t, real_t, sr,
-                                              data_info.get('db_cutoff', -40))[0].cpu().numpy()
+        gen_wave = unscale_rir_from_reference(gen_t, real_t, sr, data_info['scale_exponent'], data_info.get('db_cutoff', -40))[0].cpu().numpy()
 
     return gen_wave
 

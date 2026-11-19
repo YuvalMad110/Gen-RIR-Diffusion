@@ -6,6 +6,7 @@ from utils.signal_proc import scale_rir, zero_tail
 def scale_collate_fn(sr: float,
                      db_cutoff: float = -40.0,
                      scale_rir_flag: bool = True,
+                     scale_exponent: float = 1.0,
                      apply_zero_tail: bool = False,
                      use_rt60: bool = False):
     """
@@ -30,6 +31,7 @@ def scale_collate_fn(sr: float,
         sr:              sample rate of the RIRs
         db_cutoff:       dB level the zero-tail cutoff point is read at
         scale_rir_flag:  whether to flatten each RIR's decay, at the rate its rt60 implies
+        scale_exponent:  share of that decay to flatten; 1 cancels it, 0 leaves the RIR as it is
         apply_zero_tail: whether to zero the signal after the db_cutoff point
         use_rt60:        must match the dataset's own use_rt60, since it sets how many fields each sample carries
     """
@@ -43,7 +45,7 @@ def scale_collate_fn(sr: float,
             batch_rirs = zero_tail(batch_rirs, sr, db_cutoff)
 
         if scale_rir_flag:
-            batch_rirs = scale_rir(batch_rirs, sr, rt60s)
+            batch_rirs = scale_rir(batch_rirs, sr, rt60s, scale_exponent)
 
         return batch_rirs
 

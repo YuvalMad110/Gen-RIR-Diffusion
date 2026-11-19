@@ -274,8 +274,7 @@ def main():
         ref_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in synthetic_rirs])
         gen_tensor = torch.stack([torch.tensor(w, dtype=torch.float32) for w in diffusion_rirs])
 
-        gen_unscaled = unscale_rir_from_reference(gen_tensor, ref_tensor, sr,
-                                                  data_info.get('db_cutoff', -40))
+        gen_unscaled = unscale_rir_from_reference(gen_tensor, ref_tensor, sr, data_info['scale_exponent'], data_info.get('db_cutoff', -40))
         diffusion_rirs = [g.cpu().numpy() for g in gen_unscaled]
 
     # ---------- Evaluate ----------

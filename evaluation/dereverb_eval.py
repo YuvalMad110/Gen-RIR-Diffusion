@@ -323,8 +323,7 @@ def run_evaluation(model, data_info: dict, dereverb_model: DereverbModel, test_d
             gen_tensor = torch.stack(
                 [torch.tensor(w, dtype=torch.float32) for w in gen_waves_native]
             )
-            gen_unscaled = unscale_rir_from_reference(gen_tensor, real_tensor, native_sr,
-                                                      data_info.get("db_cutoff", -40))
+            gen_unscaled = unscale_rir_from_reference(gen_tensor, real_tensor, native_sr, data_info["scale_exponent"], data_info.get("db_cutoff", -40))
             gen_waves_native = [g.cpu().numpy() for g in gen_unscaled]
 
         # --- Resample both RIR sets to 16 kHz for the dereverberation model ----
